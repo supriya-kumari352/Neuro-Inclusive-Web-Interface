@@ -51,6 +51,23 @@ function buildSmartTldrText(sourceText: string, tldr: string, bullets: string): 
   ].join("\n");
 }
 
+function buildKeyPointsText(sourceText: string, bullets: string): string {
+  const bulletLines = cleanSummaryLines(bullets);
+  const fallbackSentences = sentenceList(sourceText);
+  const keyBullets = (bulletLines.length ? bulletLines : fallbackSentences)
+    .slice(0, 3)
+    .map((line) => `- ${line}`)
+    .join("\n");
+  const takeaway = bulletLines[0] || fallbackSentences[0] || "No key points available.";
+
+  return [
+    "3 key bullet points:",
+    keyBullets || "- No key points available.",
+    "",
+    `Key takeaway: ${takeaway}`,
+  ].join("\n");
+}
+
 function cognitiveBand(score: number | null): "Easy" | "Medium" | "Hard" | "—" {
   if (score == null) return "—";
   if (score < 35) return "Easy";
@@ -415,7 +432,7 @@ export default function App() {
       let summary = apiSummary ?? "";
       if (!api.ok || typeof api.summary !== "string" || !apiSummary) {
         summary = localSummarize(sourceText, "bullets");
-        s.setSummaryText(summary);
+        s.setSummaryText(buildKeyPointsText(sourceText, summary));
         if (!api.ok) {
           s.setStatus(`Bullets (offline fallback: ${api.error})`);
         } else if (typeof api.summary !== "string") {
@@ -425,7 +442,7 @@ export default function App() {
         }
         return;
       }
-      s.setSummaryText(summary);
+      s.setSummaryText(buildKeyPointsText(sourceText, summary));
       s.setStatus("Bullets ready.");
     },
     [s]

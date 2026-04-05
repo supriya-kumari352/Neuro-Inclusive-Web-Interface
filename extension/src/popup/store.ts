@@ -98,6 +98,29 @@ const defaultSettings: Pick<
   useServerCognitive: false,
 };
 
+const defaultPagePreset: Pick<
+  AppState,
+  | "theme"
+  | "fontSizePx"
+  | "lineHeight"
+  | "letterSpacingEm"
+  | "readabilityMode"
+  | "distractionReduction"
+  | "focusMode"
+  | "bionicReading"
+  | "readingRuler"
+> = {
+  theme: defaultSettings.theme,
+  fontSizePx: defaultSettings.fontSizePx,
+  lineHeight: defaultSettings.lineHeight,
+  letterSpacingEm: defaultSettings.letterSpacingEm,
+  readabilityMode: defaultSettings.readabilityMode,
+  distractionReduction: defaultSettings.distractionReduction,
+  focusMode: defaultSettings.focusMode,
+  bionicReading: defaultSettings.bionicReading,
+  readingRuler: defaultSettings.readingRuler,
+};
+
 function toPageSettings(s: AppState): PageSettings {
   return {
     theme: s.theme,
@@ -121,6 +144,7 @@ export const useStore = create<AppState>((set, get) => ({
     set((state) => ({
       ...state,
       profile,
+      ...defaultPagePreset,
       ...extra,
     }));
   },

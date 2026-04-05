@@ -185,6 +185,9 @@ let quickReadabilityInput: HTMLInputElement | null = null;
 let quickDistractionInput: HTMLInputElement | null = null;
 let quickFocusInput: HTMLInputElement | null = null;
 let quickImportanceInput: HTMLInputElement | null = null;
+let quickMenuBusy = false;
+const quickActionButtons = new Set<HTMLButtonElement>();
+let quickDismissHandlersAttached = false;
 let readingFlowEnabled = false;
 let flowParagraphs: HTMLElement[] = [];
 let flowCurrentParagraph: HTMLElement | null = null;
@@ -539,7 +542,7 @@ function disableReadingFlowAssistant(): void {
   hideFlowUi();
 }
 
-function bulletHintsFromSummary(summary: string): string[] {
+function cleanSummaryLines(summary: string): string[] {
   return summary
     .split(/\n+/)
     .map((line) => line.replace(/^[-*•]\s*/, "").trim())
@@ -547,20 +550,27 @@ function bulletHintsFromSummary(summary: string): string[] {
     .slice(0, 3);
 }
 
-function buildSmartTldr(text: string, hints: string[] = []): string {
-  const raw = text.slice(0, MAX_TEXT_FOR_LOCAL).replace(/\s+/g, " ").trim();
-  if (!raw) return "No content to summarize.";
-
-  const sentences = raw
+function summarySentenceList(text: string): string[] {
+  return text
+    .replace(/\s+/g, " ")
     .split(/(?<=[.!?])\s+/)
     .map((s) => s.trim())
     .filter(Boolean);
+}
 
-  const oneLine = sentences[0] || raw.slice(0, 160);
-  const bullets = hints.length ? hints : sentences.slice(0, 3);
-  const takeaway = sentences[1] || oneLine;
+function buildSmartTldr(sourceText: string, tldrText: string, bulletsText: string): string {
+  const raw = sourceText.slice(0, MAX_TEXT_FOR_LOCAL).replace(/\s+/g, " ").trim();
+  if (!raw) return "No content to summarize.";
 
-  const bulletLines = (bullets.length ? bullets : [oneLine])
+  const sourceSentences = summarySentenceList(raw);
+  const tldrSentences = summarySentenceList(tldrText);
+  const bulletLines = cleanSummaryLines(bulletsText);
+
+  const oneLine = tldrSentences[0] || sourceSentences[0] || raw.slice(0, 160);
+  const bullets = (bulletLines.length ? bulletLines : sourceSentences).slice(0, 3);
+  const takeaway = tldrSentences[1] || bullets[0] || oneLine;
+
+  const bulletOutput = (bullets.length ? bullets : [oneLine])
     .slice(0, 3)
     .map((line) => `- ${line}`)
     .join("\n");
@@ -569,7 +579,27 @@ function buildSmartTldr(text: string, hints: string[] = []): string {
     `1-line summary: ${oneLine}`,
     "",
     "3 key bullet points:",
-    bulletLines,
+    bulletOutput || "- No key points available.",
+    "",
+    `Key takeaway: ${takeaway}`,
+  ].join("\n");
+}
+
+function buildKeyPointsSummary(sourceText: string, bulletsText: string): string {
+  const sourceSentences = summarySentenceList(sourceText);
+  const bullets = (cleanSummaryLines(bulletsText).length
+    ? cleanSummaryLines(bulletsText)
+    : sourceSentences
+  )
+    .slice(0, 3)
+    .map((line) => `- ${line}`)
+    .join("\n");
+
+  const takeaway = cleanSummaryLines(bulletsText)[0] || sourceSentences[0] || "No key points available.";
+
+  return [
+    "3 key bullet points:",
+    bullets || "- No key points available.",
     "",
     `Key takeaway: ${takeaway}`,
   ].join("\n");
@@ -1009,9 +1039,64 @@ function ensureDistractionObserver(): void {
   });
 }
 
+function isNeutralSettings(settings: PageSettings): boolean {
+  const eps = 0.001;
+  return (
+    settings.theme === "default" &&
+    Math.abs(settings.fontSizePx - 16) <= eps &&
+    Math.abs(settings.lineHeight - 1.5) <= eps &&
+    Math.abs(settings.letterSpacingEm) <= eps &&
+    !settings.readabilityMode &&
+    !settings.distractionReduction &&
+    !settings.focusMode &&
+    !settings.bionicReading &&
+    !settings.readingRuler
+  );
+}
+
+function resetPageToOriginalView(): void {
+  const html = document.documentElement;
+
+  html.removeAttribute(BASE_ATTR);
+  html.removeAttribute("data-neuro-inclusive-distract");
+  html.classList.remove(
+    "theme-default",
+    "theme-dark",
+    "theme-sepia",
+    "theme-dyslexia",
+    "theme-autism"
+  );
+
+  if (styleEl) styleEl.textContent = "";
+  if (distractionEl) distractionEl.textContent = "";
+
+  restoreDistractionElements();
+  removeFocusOverlay();
+  disableReadingFlowAssistant();
+
+  document.querySelectorAll(".neuro-inclusive-main").forEach((n) => {
+    n.classList.remove("neuro-inclusive-main");
+  });
+
+  applyReadingRuler(false);
+  applyBionicReading(false);
+  clearDifficultHighlights();
+  if (importanceHeatmapEnabled) {
+    setImportanceHeatmapEnabled(false);
+  }
+  showSimplifiedPanel("", false);
+}
+
 function applySettings(settings: PageSettings): void {
   currentSettings = { ...settings };
   syncQuickToggleState();
+
+  if (isNeutralSettings(settings)) {
+    invalidateAnalysisCache();
+    resetPageToOriginalView();
+    setQuickStatus("Restored site defaults.");
+    return;
+  }
 
   const html = document.documentElement;
   invalidateAnalysisCache();
@@ -1316,21 +1401,49 @@ function ensureSimplifiedPanel(): HTMLDivElement {
       background: #1e1e1e;
       color: #f0f0f0;
       border: 1px solid rgba(255,255,255,0.12);
+      white-space: pre-wrap;
+      word-break: break-word;
+      overflow-wrap: anywhere;
     `;
     document.documentElement.appendChild(el);
   }
   return el;
 }
 
+function normalizePanelText(raw: string): string {
+  return raw
+    .replace(/\r\n/g, "\n")
+    .replace(/```(?:\w+)?\n?/g, "")
+    .replace(/```/g, "")
+    .replace(/^#{1,6}\s+/gm, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
 function showSimplifiedPanel(text: string, visible: boolean): void {
   const el = ensureSimplifiedPanel();
-  el.textContent = text;
+  el.textContent = normalizePanelText(text);
   el.style.display = visible ? "block" : "none";
 }
 
 function setQuickStatus(text: string): void {
   if (!quickStatusEl) return;
   quickStatusEl.textContent = text;
+}
+
+function registerQuickActionButton(btn: HTMLButtonElement): HTMLButtonElement {
+  quickActionButtons.add(btn);
+  return btn;
+}
+
+function setQuickMenuBusy(busy: boolean): void {
+  quickMenuBusy = busy;
+  if (quickPanelEl) {
+    quickPanelEl.setAttribute("aria-busy", busy ? "true" : "false");
+  }
+  for (const btn of quickActionButtons) {
+    btn.disabled = busy;
+  }
 }
 
 function syncQuickToggleState(): void {
@@ -1344,6 +1457,29 @@ function setQuickPanelOpen(open: boolean): void {
   if (!quickPanelEl || !quickLauncherEl) return;
   quickPanelEl.style.display = open ? "block" : "none";
   quickLauncherEl.setAttribute("aria-expanded", open ? "true" : "false");
+  if (!open) {
+    setQuickMenuBusy(false);
+  }
+}
+
+function ensureQuickDismissHandlers(): void {
+  if (quickDismissHandlersAttached) return;
+  quickDismissHandlersAttached = true;
+
+  document.addEventListener("mousedown", (event) => {
+    if (!quickPanelEl || quickPanelEl.style.display !== "block") return;
+    const target = event.target as Node | null;
+    if (!target) return;
+    if (quickPanelEl.contains(target)) return;
+    if (quickLauncherEl && quickLauncherEl.contains(target)) return;
+    setQuickPanelOpen(false);
+  });
+
+  window.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape") return;
+    if (!quickPanelEl || quickPanelEl.style.display !== "block") return;
+    setQuickPanelOpen(false);
+  });
 }
 
 function ensureQuickLauncher(): HTMLButtonElement {
@@ -1383,108 +1519,116 @@ function ensureQuickLauncher(): HTMLButtonElement {
 }
 
 async function simplifyFromQuickMenu(): Promise<void> {
+  if (quickMenuBusy) return;
+  setQuickMenuBusy(true);
   setQuickStatus("Simplifying...");
+  try {
+    const analysis = getPageAnalysis(true);
+    const sourceText = (analysis.prioritizedText || analysis.text).trim();
+    if (!sourceText) {
+      setQuickStatus("No visible text found on this page.");
+      return;
+    }
 
-  const analysis = getPageAnalysis(true);
-  const sourceText = (analysis.prioritizedText || analysis.text).trim();
-  if (!sourceText) {
-    setQuickStatus("No visible text found on this page.");
-    return;
-  }
+    const needsAi =
+      sourceText.length > 1400 ||
+      analysis.difficultTerms.length >= 4 ||
+      (analysis.domStats.denseTextBlocks ?? 0) >= 2;
 
-  const needsAi =
-    sourceText.length > 1400 ||
-    analysis.difficultTerms.length >= 4 ||
-    (analysis.domStats.denseTextBlocks ?? 0) >= 2;
+    const aiInput = sourceText.slice(0, MAX_TEXT_FOR_REMOTE);
+    let simplified = "";
+    let statusSuffix = "";
 
-  const aiInput = sourceText.slice(0, MAX_TEXT_FOR_REMOTE);
-  let simplified = "";
-  let statusSuffix = "";
-
-  if (needsAi) {
-    const res = await bgRequest({
-      type: "API_SIMPLIFY",
-      text: aiInput,
-      apiBase: currentApiBase,
-    });
-    if (res.ok && typeof res.simplified === "string" && res.simplified.trim()) {
-      simplified = res.simplified.trim();
-      statusSuffix = "AI";
+    if (needsAi) {
+      const res = await bgRequest({
+        type: "API_SIMPLIFY",
+        text: aiInput,
+        apiBase: currentApiBase,
+      });
+      if (res.ok && typeof res.simplified === "string" && res.simplified.trim()) {
+        simplified = res.simplified.trim();
+        statusSuffix = "AI";
+      } else {
+        simplified = localSimplifyFallback(sourceText);
+        statusSuffix = "fallback";
+      }
     } else {
       simplified = localSimplifyFallback(sourceText);
-      statusSuffix = "fallback";
+      statusSuffix = "local";
     }
-  } else {
-    simplified = localSimplifyFallback(sourceText);
-    statusSuffix = "local";
-  }
 
-  showSimplifiedPanel(simplified, true);
-  setQuickStatus(`Simplified (${statusSuffix}).`);
+    showSimplifiedPanel(simplified, true);
+    setQuickStatus(`Simplified (${statusSuffix}).`);
+  } finally {
+    setQuickMenuBusy(false);
+  }
 }
 
 async function summarizeFromQuickMenu(mode: "tldr" | "bullets"): Promise<void> {
+  if (quickMenuBusy) return;
+  setQuickMenuBusy(true);
   setQuickStatus(mode === "tldr" ? "Creating TL;DR..." : "Creating key points...");
+  try {
+    const analysis = getPageAnalysis(true);
+    const sourceText = (analysis.prioritizedText || analysis.text).trim();
+    if (!sourceText) {
+      setQuickStatus("No visible text found on this page.");
+      return;
+    }
 
-  const analysis = getPageAnalysis(true);
-  const sourceText = (analysis.prioritizedText || analysis.text).trim();
-  if (!sourceText) {
-    setQuickStatus("No visible text found on this page.");
-    return;
-  }
+    if (mode === "tldr") {
+      const [tldrRes, bulletsRes] = await Promise.all([
+        bgRequest({
+          type: "API_SUMMARIZE",
+          text: sourceText.slice(0, MAX_TEXT_FOR_REMOTE),
+          mode: "tldr",
+          apiBase: currentApiBase,
+        }),
+        bgRequest({
+          type: "API_SUMMARIZE",
+          text: sourceText.slice(0, MAX_TEXT_FOR_REMOTE),
+          mode: "bullets",
+          apiBase: currentApiBase,
+        }),
+      ]);
 
-  if (mode === "tldr") {
-    const [tldrRes, bulletsRes] = await Promise.all([
-      bgRequest({
-        type: "API_SUMMARIZE",
-        text: sourceText.slice(0, MAX_TEXT_FOR_REMOTE),
-        mode: "tldr",
-        apiBase: currentApiBase,
-      }),
-      bgRequest({
-        type: "API_SUMMARIZE",
-        text: sourceText.slice(0, MAX_TEXT_FOR_REMOTE),
-        mode: "bullets",
-        apiBase: currentApiBase,
-      }),
-    ]);
+      const tldrText =
+        tldrRes.ok && typeof tldrRes.summary === "string" && tldrRes.summary.trim()
+          ? tldrRes.summary.trim()
+          : localSummarizeFallback(sourceText, "tldr");
 
-    const tldrText =
-      tldrRes.ok && typeof tldrRes.summary === "string" && tldrRes.summary.trim()
-        ? tldrRes.summary.trim()
-        : localSummarizeFallback(sourceText, "tldr");
+      const bulletText =
+        bulletsRes.ok && typeof bulletsRes.summary === "string" && bulletsRes.summary.trim()
+          ? bulletsRes.summary.trim()
+          : localSummarizeFallback(sourceText, "bullets");
 
-    const bulletText =
-      bulletsRes.ok && typeof bulletsRes.summary === "string" && bulletsRes.summary.trim()
-        ? bulletsRes.summary.trim()
+      const smart = buildSmartTldr(sourceText, tldrText, bulletText);
+      showSimplifiedPanel(smart, true);
+      setQuickStatus(tldrRes.ok || bulletsRes.ok ? "Smart TL;DR ready." : "Smart TL;DR fallback used.");
+      return;
+    }
+
+    const res = await bgRequest({
+      type: "API_SUMMARIZE",
+      text: sourceText.slice(0, MAX_TEXT_FOR_REMOTE),
+      mode: "bullets",
+      apiBase: currentApiBase,
+    });
+
+    const summary =
+      res.ok && typeof res.summary === "string" && res.summary.trim()
+        ? res.summary.trim()
         : localSummarizeFallback(sourceText, "bullets");
 
-    const smart = buildSmartTldr(
-      `${tldrText}\n${sourceText}`,
-      bulletHintsFromSummary(bulletText)
-    );
-    showSimplifiedPanel(smart, true);
-    setQuickStatus("Smart TL;DR ready.");
-    return;
+    showSimplifiedPanel(buildKeyPointsSummary(sourceText, summary), true);
+    setQuickStatus(res.ok ? "Key points ready." : "Key points fallback used.");
+  } finally {
+    setQuickMenuBusy(false);
   }
-
-  const res = await bgRequest({
-    type: "API_SUMMARIZE",
-    text: sourceText.slice(0, MAX_TEXT_FOR_REMOTE),
-    mode: "bullets",
-    apiBase: currentApiBase,
-  });
-
-  const summary =
-    res.ok && typeof res.summary === "string" && res.summary.trim()
-      ? res.summary.trim()
-      : localSummarizeFallback(sourceText, "bullets");
-
-  showSimplifiedPanel(summary, true);
-  setQuickStatus(res.ok ? "Key points ready." : "Key points fallback used.");
 }
 
 function showStructuredLayoutFromQuickMenu(): void {
+  if (quickMenuBusy) return;
   const analysis = getPageAnalysis(true);
   const structured = buildStructuredLayoutText(analysis);
   showSimplifiedPanel(structured, true);
@@ -1584,7 +1728,7 @@ function ensureQuickPanel(): HTMLDivElement {
   const actions = document.createElement("div");
   actions.style.cssText = "display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:8px;";
 
-  const simplifyBtn = document.createElement("button");
+  const simplifyBtn = registerQuickActionButton(document.createElement("button"));
   simplifyBtn.type = "button";
   simplifyBtn.textContent = "Simplify";
   simplifyBtn.style.cssText = "border:0;border-radius:8px;padding:7px 8px;background:#1f8a70;color:#ffffff;font-size:12px;cursor:pointer;";
@@ -1592,7 +1736,7 @@ function ensureQuickPanel(): HTMLDivElement {
     void simplifyFromQuickMenu();
   });
 
-  const tldrBtn = document.createElement("button");
+  const tldrBtn = registerQuickActionButton(document.createElement("button"));
   tldrBtn.type = "button";
   tldrBtn.textContent = "TL;DR";
   tldrBtn.style.cssText = "border:0;border-radius:8px;padding:7px 8px;background:#dbe9f3;color:#1f2f3a;font-size:12px;cursor:pointer;";
@@ -1600,7 +1744,7 @@ function ensureQuickPanel(): HTMLDivElement {
     void summarizeFromQuickMenu("tldr");
   });
 
-  const bulletsBtn = document.createElement("button");
+  const bulletsBtn = registerQuickActionButton(document.createElement("button"));
   bulletsBtn.type = "button";
   bulletsBtn.textContent = "Key points";
   bulletsBtn.style.cssText = "border:0;border-radius:8px;padding:7px 8px;background:#dbe9f3;color:#1f2f3a;font-size:12px;cursor:pointer;";
@@ -1608,7 +1752,7 @@ function ensureQuickPanel(): HTMLDivElement {
     void summarizeFromQuickMenu("bullets");
   });
 
-  const structuredBtn = document.createElement("button");
+  const structuredBtn = registerQuickActionButton(document.createElement("button"));
   structuredBtn.type = "button";
   structuredBtn.textContent = "Structured view";
   structuredBtn.style.cssText = "border:0;border-radius:8px;padding:7px 8px;background:#e4eef7;color:#1f2f3a;font-size:12px;cursor:pointer;";
@@ -1616,7 +1760,7 @@ function ensureQuickPanel(): HTMLDivElement {
     showStructuredLayoutFromQuickMenu();
   });
 
-  const continueBtn = document.createElement("button");
+  const continueBtn = registerQuickActionButton(document.createElement("button"));
   continueBtn.type = "button";
   continueBtn.textContent = "Continue reading";
   continueBtn.style.cssText = "border:0;border-radius:8px;padding:7px 8px;background:#e4eef7;color:#1f2f3a;font-size:12px;cursor:pointer;";
@@ -1624,7 +1768,7 @@ function ensureQuickPanel(): HTMLDivElement {
     continueReadingFromMarker();
   });
 
-  const hideTextBtn = document.createElement("button");
+  const hideTextBtn = registerQuickActionButton(document.createElement("button"));
   hideTextBtn.type = "button";
   hideTextBtn.textContent = "Hide text panel";
   hideTextBtn.style.cssText = "border:0;border-radius:8px;padding:7px 8px;background:#ffffff;color:#3a4f60;font-size:12px;cursor:pointer;border:1px solid #c9d9e5;";
@@ -1657,6 +1801,7 @@ function ensureQuickPanel(): HTMLDivElement {
 function ensureQuickMenu(): void {
   ensureQuickLauncher();
   ensureQuickPanel();
+  ensureQuickDismissHandlers();
 }
 
 // HOVER-TO-EXPLAIN TOOLTIP
