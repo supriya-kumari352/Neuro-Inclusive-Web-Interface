@@ -1,8 +1,9 @@
 import fs from "node:fs/promises";
 
-const API_BASE = process.env.API_BASE || "http://localhost:3000";
+const API_BASE = (process.env.API_BASE || "http://localhost:3000").replace(/\/+$/, "");
 const INPUT_FILE = "docs/evaluation/synthetic-suite.json";
 const OUT_FILE = "docs/evaluation/latest-results.json";
+const REQUEST_TIMEOUT_MS = Number(process.env.API_TIMEOUT_MS || 12000);
 
 function splitWords(text) {
   return text.trim().split(/\s+/).filter(Boolean);
@@ -36,29 +37,75 @@ function percentDelta(before, after) {
   return ((after - before) / before) * 100;
 }
 
+async function fetchWithTimeout(url, init) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function postJson(path, body) {
+  let r;
+  try {
+    r = await fetchWithTimeout(`${API_BASE}${path}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  } catch (err) {
+    if (err instanceof DOMException && err.name === "AbortError") {
+      throw new Error(`Request timed out for ${path} after ${REQUEST_TIMEOUT_MS}ms`);
+    }
+    throw err;
+  }
+  if (!r.ok) {
+    const text = await r.text().catch(() => "");
+    throw new Error(`${path} failed: ${r.status} ${text || r.statusText}`);
+  }
+  return await r.json();
+}
+
+async function checkApiPreflight() {
+  let r;
+  try {
+    r = await fetchWithTimeout(`${API_BASE}/health`, { method: "GET" });
+  } catch (err) {
+    if (err instanceof DOMException && err.name === "AbortError") {
+      throw new Error(`API preflight timed out after ${REQUEST_TIMEOUT_MS}ms at ${API_BASE}/health`);
+    }
+    throw new Error(`API preflight failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  if (!r.ok) {
+    throw new Error(`API preflight failed: /health returned ${r.status}`);
+  }
+  const j = await r.json().catch(() => null);
+  if (!j || j.ok !== true) {
+    throw new Error("API preflight failed: invalid /health response");
+  }
+}
+
 async function simplify(text) {
-  const r = await fetch(`${API_BASE}/api/simplify`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ text }),
-  });
-  if (!r.ok) throw new Error(`Simplify failed: ${r.status} ${await r.text()}`);
-  const j = await r.json();
-  return j.simplified || "";
+  const j = await postJson("/api/simplify", { text });
+  if (typeof j?.simplified !== "string") {
+    throw new Error("Invalid simplify response shape");
+  }
+  return j.simplified;
 }
 
 async function summarize(text, mode) {
-  const r = await fetch(`${API_BASE}/api/summarize`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ text, mode }),
-  });
-  if (!r.ok) throw new Error(`Summarize failed: ${r.status} ${await r.text()}`);
-  const j = await r.json();
-  return j.summary || "";
+  const j = await postJson("/api/summarize", { text, mode });
+  if (typeof j?.summary !== "string") {
+    throw new Error("Invalid summarize response shape");
+  }
+  return j.summary;
 }
 
 async function main() {
+  await checkApiPreflight();
+
   const suite = JSON.parse(await fs.readFile(INPUT_FILE, "utf8"));
   const perCase = [];
   let passed = 0;

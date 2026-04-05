@@ -8,8 +8,41 @@ export type DomStats = {
   videos: number;
   buttons: number;
   links: number;
+  headings?: number;
+  popups?: number;
+  sidebars?: number;
+  denseTextBlocks?: number;
+  textDensity?: number;
+  difficultTerms?: number;
   /** Rough depth sample: max nesting depth in a subtree scan */
   maxDepthSample: number;
+};
+
+export type NodeCategory =
+  | "main-content"
+  | "navigation"
+  | "ads"
+  | "popup"
+  | "sidebar"
+  | "dense-text"
+  | "other";
+
+export type AnalysisBlock = {
+  id: string;
+  text: string;
+  category: NodeCategory;
+  screenTop: number;
+  relevance: number;
+  visibility: number;
+  difficultTerms: string[];
+};
+
+export type PageAnalysis = {
+  text: string;
+  prioritizedText: string;
+  domStats: DomStats;
+  difficultTerms: string[];
+  blocks: AnalysisBlock[];
 };
 
 export type BackgroundRequest =
@@ -25,6 +58,7 @@ export type BackgroundResponse =
 export type ContentRequest =
   | { type: "GET_PAGE_TEXT" }
   | { type: "GET_DOM_STATS" }
+  | { type: "GET_PAGE_ANALYSIS" }
   | { type: "APPLY_SETTINGS"; settings: PageSettings; apiBase?: string }
   | { type: "SHOW_SIMPLIFIED"; simplified: string; show: boolean }
   | { type: "SET_FOCUS_MODE"; on: boolean }
@@ -43,5 +77,5 @@ export type PageSettings = {
 };
 
 export type ContentResponse =
-  | { ok: true; text?: string; domStats?: DomStats }
+  | { ok: true; text?: string; domStats?: DomStats; analysis?: PageAnalysis }
   | { ok: false; error: string };

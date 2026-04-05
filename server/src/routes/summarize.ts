@@ -28,13 +28,15 @@ function mockSummarize(text: string, mode: "tldr" | "bullets"): string {
 }
 
 router.post("/", async (req, res) => {
+  let clipped = "";
+  let mode: "tldr" | "bullets" = "tldr";
   try {
     const text = typeof req.body?.text === "string" ? req.body.text : "";
-    const mode = req.body?.mode === "bullets" ? "bullets" : "tldr";
-    if (!text.trim()) {
+    mode = req.body?.mode === "bullets" ? "bullets" : "tldr";
+    clipped = text.slice(0, MAX_IN).trim();
+    if (!clipped) {
       return res.status(400).json({ error: "Missing text" });
     }
-    const clipped = text.slice(0, MAX_IN);
 
     if (!isGeminiConfigured()) {
       return res.json({
@@ -51,20 +53,31 @@ router.post("/", async (req, res) => {
       const model = getModel();
       const result = await model.generateContent(`${summarizeSystem}\n\n${user}`);
       const out = result.response.text().trim();
+      if (!out) {
+        return res.json({
+          summary: mockSummarize(clipped, mode),
+          mode,
+          mock: true,
+          reason: "Gemini returned empty output — using local fallback",
+        });
+      }
       return res.json({ summary: out, mode });
     } catch (apiErr) {
-      console.warn("summarize: Gemini failed, using fallback:", (apiErr as Error).message);
+      console.warn("summarize: Gemini failed, using fallback");
       return res.json({
         summary: mockSummarize(clipped, mode),
         mode,
         mock: true,
-        reason: `Gemini unavailable: ${(apiErr as Error).message?.slice(0, 120)}`,
+        reason: "Gemini unavailable — using local fallback",
       });
     }
   } catch (e) {
     console.error("summarize", e);
-    return res.status(500).json({
-      error: e instanceof Error ? e.message : "Summarize failed",
+    return res.json({
+      summary: mockSummarize(clipped, mode),
+      mode,
+      mock: true,
+      reason: "Server error — using local fallback",
     });
   }
 });

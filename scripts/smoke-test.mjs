@@ -2,7 +2,8 @@
  * Smoke test: hit all 4 API routes + /health and report results.
  * Run with: node scripts/smoke-test.mjs
  */
-const BASE = "http://localhost:3000";
+const BASE = (process.env.API_BASE || "http://localhost:3000").replace(/\/+$/, "");
+const REQUEST_TIMEOUT_MS = Number(process.env.API_TIMEOUT_MS || 12000);
 
 const SAMPLE_TEXT =
   "Photosynthesis is the intricate biochemical process by which chlorophyll-bearing organisms " +
@@ -10,21 +11,58 @@ const SAMPLE_TEXT =
   "ultimately synthesizing glucose and oxygen from carbon dioxide and water.";
 
 async function post(path, body) {
-  const res = await fetch(`${BASE}${path}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  const json = await res.json();
-  return { status: res.status, ok: res.ok, ...json };
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  try {
+    const res = await fetch(`${BASE}${path}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+    const json = await res.json().catch(() => ({}));
+    return { status: res.status, ok: res.ok, ...json };
+  } catch (e) {
+    if (e instanceof DOMException && e.name === "AbortError") {
+      return { status: 0, ok: false, error: `Request timed out after ${REQUEST_TIMEOUT_MS}ms` };
+    }
+    return { status: 0, ok: false, error: e instanceof Error ? e.message : "Network error" };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function getHealth() {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  try {
+    const res = await fetch(`${BASE}/health`, {
+      method: "GET",
+      signal: controller.signal,
+    });
+    const json = await res.json().catch(() => ({}));
+    return { status: res.status, ok: res.ok, ...json };
+  } catch (e) {
+    if (e instanceof DOMException && e.name === "AbortError") {
+      return { status: 0, ok: false, error: `Request timed out after ${REQUEST_TIMEOUT_MS}ms` };
+    }
+    return { status: 0, ok: false, error: e instanceof Error ? e.message : "Network error" };
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 async function run() {
   console.log("=== Neuro-Inclusive API Smoke Test ===\n");
+  console.log(`Base URL: ${BASE}`);
+  console.log();
 
   // Health
-  const health = await fetch(`${BASE}/health`).then((r) => r.json());
+  const health = await getHealth();
   console.log("[/health]", JSON.stringify(health));
+  if (!health.ok) {
+    throw new Error("Health check failed. Start the API server before running smoke tests.");
+  }
   console.log();
 
   // Simplify

@@ -24,6 +24,14 @@ export function summarizeUserBullets(text: string): string {
   return `Give 5-8 bullet points summarizing the following content. Use a leading "- " for each bullet:\n\n${text}`;
 }
 
+export const defineSystem = `You are a helpful dictionary assistant for neurodivergent users.
+Provide a very short, concrete 'Explain Like I'm 5' definition.
+Use exactly 1-2 simple sentences, basic vocabulary, and no jargon.`;
+
+export function defineUser(text: string): string {
+  return `Term to define:\n"${text}"`;
+}
+
 export const cognitiveLoadSystem = `You analyze reading difficulty. Reply with a single JSON object only, no markdown, with keys:
 - "score": number from 0-100 (higher = more cognitive load)
 - "reason": one short sentence explaining the main factor

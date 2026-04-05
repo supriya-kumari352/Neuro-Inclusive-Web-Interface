@@ -54,6 +54,15 @@ export function buildThemeCss(
     html[${BASE_ATTR}].theme-autism a {
       color: #455a64 !important;
     }
+    html[${BASE_ATTR}] [data-neuro-inclusive-difficult="1"] {
+      outline: 2px solid rgba(255, 170, 0, 0.35) !important;
+      outline-offset: 2px !important;
+      background-image: linear-gradient(
+        90deg,
+        rgba(255, 214, 102, 0.12),
+        rgba(255, 214, 102, 0)
+      ) !important;
+    }
     ${read}
   `;
 }

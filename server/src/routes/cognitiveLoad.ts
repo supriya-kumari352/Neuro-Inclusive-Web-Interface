@@ -3,6 +3,7 @@ import { getModel, isGeminiConfigured } from "../lib/gemini.js";
 import { cognitiveLoadSystem, cognitiveLoadUser } from "../lib/prompts.js";
 
 const router = Router();
+const MAX_IN = 12000;
 
 /**
  * Optional Gemini-assisted cognitive load — returns JSON { score, reason }.
@@ -19,33 +20,39 @@ function heuristicScore(text: string): { score: number; reason: string } {
 }
 
 router.post("/", async (req, res) => {
+  let clipped = "";
   try {
     const text = typeof req.body?.text === "string" ? req.body.text : "";
+    clipped = text.slice(0, MAX_IN).trim();
     const domStats = req.body?.domStats;
     const domHint =
       domStats && typeof domStats === "object"
         ? JSON.stringify(domStats)
         : "unknown";
-    if (!text.trim()) {
+    if (!clipped) {
       return res.status(400).json({ error: "Missing text" });
     }
 
     if (!isGeminiConfigured()) {
-      const h = heuristicScore(text);
+      const h = heuristicScore(clipped);
       return res.json({ ...h, mock: true });
     }
 
     try {
       const model = getModel();
       const result = await model.generateContent(
-        `${cognitiveLoadSystem}\n\n${cognitiveLoadUser(text, domHint)}`
+        `${cognitiveLoadSystem}\n\n${cognitiveLoadUser(clipped, domHint)}`
       );
       const raw = result.response.text().trim();
       let parsed: { score?: number; reason?: string };
       try {
         parsed = JSON.parse(raw.replace(/^```json\s*/i, "").replace(/```\s*$/, ""));
       } catch {
-        return res.json({ score: 50, reason: raw.slice(0, 200), raw });
+        return res.json({
+          score: 50,
+          reason: "Model output was not valid JSON — using safe default",
+          mock: true,
+        });
       }
       const score = Math.max(0, Math.min(100, Number(parsed.score) || 50));
       return res.json({
@@ -53,15 +60,14 @@ router.post("/", async (req, res) => {
         reason: typeof parsed.reason === "string" ? parsed.reason : "",
       });
     } catch (apiErr) {
-      console.warn("cognitiveLoad: Gemini failed, using fallback:", (apiErr as Error).message);
-      const h = heuristicScore(text);
+      console.warn("cognitiveLoad: Gemini failed, using fallback");
+      const h = heuristicScore(clipped);
       return res.json({ ...h, mock: true });
     }
   } catch (e) {
     console.error("cognitiveLoad", e);
-    return res.status(500).json({
-      error: e instanceof Error ? e.message : "Cognitive load failed",
-    });
+    const h = heuristicScore(clipped);
+    return res.json({ ...h, mock: true, reason: "Server error — using heuristic fallback" });
   }
 });
 

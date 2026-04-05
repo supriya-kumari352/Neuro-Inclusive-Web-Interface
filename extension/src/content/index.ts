@@ -7,10 +7,17 @@ import type {
   ContentRequest,
   ContentResponse,
   DomStats,
+  PageAnalysis,
   PageSettings,
 } from "../shared/messages.js";
 import { localDefine } from "../shared/localAiFallback.js";
-import { extractVisibleText, estimateMainElement, sampleDomDepth } from "./extract.js";
+import { estimateMainElement } from "./extract.js";
+import {
+  analyzePageDom,
+  applyDifficultHighlights,
+  clearDifficultHighlights,
+  getClassifiedElements,
+} from "./domPipeline.js";
 import {
   BASE_ATTR,
   buildThemeCss,
@@ -22,9 +29,48 @@ const GUARD_ATTR = "data-neuro-inclusive-injected";
 function initContentScript(): void {
 const OVERLAY_ID = "neuro-inclusive-simplified-panel";
 const FOCUS_ID = "neuro-inclusive-focus-layer";
+const PAUSED_BY_EXTENSION_ATTR = "data-neuro-inclusive-paused";
+const HIDDEN_BY_EXTENSION_ATTR = "data-neuro-inclusive-hidden";
+const DIMMED_BY_EXTENSION_ATTR = "data-neuro-inclusive-dimmed";
+const ANALYSIS_TTL_MS = 1200;
+const MAX_EXPLAIN_SELECTION = 300;
+
+const DISTRACTION_HIDE_SELECTOR = [
+  '[role="dialog"]',
+  '[aria-modal="true"]',
+  '[class*="modal"]',
+  '[class*="popup"]',
+  '[class*="overlay"]',
+  '[id*="cookie"]',
+  '[class*="cookie"]',
+  '[class*="newsletter"]',
+  '[class*="subscribe"]',
+].join(",");
+
+const DISTRACTION_DIM_SELECTOR = [
+  'iframe[src*="doubleclick"]',
+  'iframe[src*="googlesyndication"]',
+  '[class*="advert"]',
+  '[id*="ad-"]',
+  '[id*="ad_"]',
+  '[class*="sponsor"]',
+  'aside',
+  '[role="complementary"]',
+  'video[autoplay]',
+  'audio[autoplay]',
+].join(",");
 
 let styleEl: HTMLStyleElement | null = null;
 let distractionEl: HTMLStyleElement | null = null;
+let focusMainEl: HTMLElement | null = null;
+let focusListenersAttached = false;
+let focusRaf = 0;
+let cachedAnalysis: PageAnalysis | null = null;
+let cachedAnalysisAt = 0;
+const modifiedDistractionElements = new Set<HTMLElement>();
+const previousStyleByElement = new WeakMap<HTMLElement, string | null>();
+let distractionObserver: MutationObserver | null = null;
+let distractionRefreshRaf = 0;
 
 function ensureStyleEl(): HTMLStyleElement {
   if (!styleEl) {
@@ -44,8 +90,189 @@ function ensureDistractionEl(): HTMLStyleElement {
   return distractionEl;
 }
 
+function invalidateAnalysisCache(): void {
+  cachedAnalysis = null;
+  cachedAnalysisAt = 0;
+}
+
+function fallbackAnalysis(): PageAnalysis {
+  const text = (document.body?.innerText || "").trim().slice(0, 12000);
+  return {
+    text,
+    prioritizedText: text,
+    difficultTerms: [],
+    blocks: [],
+    domStats: {
+      images: document.images.length,
+      iframes: document.querySelectorAll("iframe").length,
+      videos: document.querySelectorAll("video").length,
+      buttons: document.querySelectorAll("button").length,
+      links: document.querySelectorAll("a").length,
+      headings: document.querySelectorAll("h1,h2,h3,h4,h5,h6").length,
+      popups: document.querySelectorAll('[role="dialog"], [aria-modal="true"]').length,
+      sidebars: document.querySelectorAll("aside, [role='complementary']").length,
+      denseTextBlocks: 0,
+      textDensity: 0,
+      difficultTerms: 0,
+      maxDepthSample: 0,
+    },
+  };
+}
+
+function getPageAnalysis(force = false): PageAnalysis {
+  if (!force && cachedAnalysis && Date.now() - cachedAnalysisAt < ANALYSIS_TTL_MS) {
+    return cachedAnalysis;
+  }
+
+  try {
+    const analysis = analyzePageDom(document);
+    cachedAnalysis = analysis;
+    cachedAnalysisAt = Date.now();
+    if (analysis.difficultTerms.length > 0) {
+      applyDifficultHighlights();
+    } else {
+      clearDifficultHighlights();
+    }
+    return analysis;
+  } catch {
+    const safeFallback = fallbackAnalysis();
+    cachedAnalysis = safeFallback;
+    cachedAnalysisAt = Date.now();
+    clearDifficultHighlights();
+    return safeFallback;
+  }
+}
+
+function shouldIgnoreDistractionTarget(el: HTMLElement): boolean {
+  if (el === document.body || el === document.documentElement) return true;
+  if (el.id === OVERLAY_ID || el.id === FOCUS_ID || el.id === RULER_ID) return true;
+  if (el.id === TOOLTIP_BTN_ID || el.id === TOOLTIP_BUBBLE_ID) return true;
+  if (el.matches("[data-neuro-inclusive]")) return true;
+  if (el.closest(`[data-neuro-inclusive="theme"]`)) return true;
+  return false;
+}
+
+function storeStyleOnce(el: HTMLElement): void {
+  if (!previousStyleByElement.has(el)) {
+    previousStyleByElement.set(el, el.getAttribute("style"));
+  }
+}
+
+function dimDistractionElement(el: HTMLElement): void {
+  if (shouldIgnoreDistractionTarget(el) || el.closest("form")) return;
+  storeStyleOnce(el);
+  modifiedDistractionElements.add(el);
+  el.style.setProperty("opacity", "0.28", "important");
+  el.style.setProperty("filter", "blur(2px) grayscale(0.35)", "important");
+  el.style.setProperty("pointer-events", "none", "important");
+  el.setAttribute(DIMMED_BY_EXTENSION_ATTR, "1");
+}
+
+function hideDistractionElement(el: HTMLElement): void {
+  if (shouldIgnoreDistractionTarget(el) || el.closest("form")) return;
+  storeStyleOnce(el);
+  modifiedDistractionElements.add(el);
+  el.style.setProperty("display", "none", "important");
+  el.setAttribute(HIDDEN_BY_EXTENSION_ATTR, "1");
+}
+
+function stopDistractionObserver(): void {
+  distractionObserver?.disconnect();
+  distractionObserver = null;
+  if (distractionRefreshRaf) {
+    window.cancelAnimationFrame(distractionRefreshRaf);
+    distractionRefreshRaf = 0;
+  }
+}
+
+function restoreDistractionElements(): void {
+  stopDistractionObserver();
+
+  for (const el of modifiedDistractionElements) {
+    const prev = previousStyleByElement.get(el);
+    if (prev == null || prev === "") {
+      el.removeAttribute("style");
+    } else {
+      el.setAttribute("style", prev);
+    }
+    el.removeAttribute(HIDDEN_BY_EXTENSION_ATTR);
+    el.removeAttribute(DIMMED_BY_EXTENSION_ATTR);
+  }
+  modifiedDistractionElements.clear();
+
+  document
+    .querySelectorAll(`video[${PAUSED_BY_EXTENSION_ATTR}="1"],audio[${PAUSED_BY_EXTENSION_ATTR}="1"]`)
+    .forEach((media) => {
+      try {
+        const playable = media as HTMLMediaElement;
+        playable.removeAttribute(PAUSED_BY_EXTENSION_ATTR);
+        void playable.play().catch(() => {
+          /* ignore autoplay policy errors */
+        });
+      } catch {
+        /* ignore */
+      }
+    });
+}
+
+function applyDistractionReductionNow(forceAnalysis = false): void {
+  void getPageAnalysis(forceAnalysis);
+
+  const hideBySelectors = Array.from(
+    document.querySelectorAll(DISTRACTION_HIDE_SELECTOR)
+  ) as HTMLElement[];
+  const dimBySelectors = Array.from(
+    document.querySelectorAll(DISTRACTION_DIM_SELECTOR)
+  ) as HTMLElement[];
+
+  const hideByTraversal = getClassifiedElements(["popup"]);
+  const dimByTraversal = getClassifiedElements(["ads", "sidebar", "navigation"]);
+
+  for (const el of hideBySelectors) hideDistractionElement(el);
+  for (const el of hideByTraversal) hideDistractionElement(el);
+  for (const el of dimBySelectors) dimDistractionElement(el);
+  for (const el of dimByTraversal) dimDistractionElement(el);
+
+  document.querySelectorAll("video[autoplay],audio[autoplay]").forEach((media) => {
+    try {
+      const playable = media as HTMLMediaElement;
+      if (!playable.paused) {
+        playable.pause();
+        playable.setAttribute(PAUSED_BY_EXTENSION_ATTR, "1");
+      }
+      dimDistractionElement(playable as HTMLElement);
+    } catch {
+      /* ignore */
+    }
+  });
+}
+
+function ensureDistractionObserver(): void {
+  if (distractionObserver) return;
+
+  distractionObserver = new MutationObserver(() => {
+    if (!document.documentElement.hasAttribute("data-neuro-inclusive-distract")) {
+      return;
+    }
+    if (distractionRefreshRaf) return;
+    distractionRefreshRaf = window.requestAnimationFrame(() => {
+      distractionRefreshRaf = 0;
+      invalidateAnalysisCache();
+      applyDistractionReductionNow(true);
+    });
+  });
+
+  distractionObserver.observe(document.documentElement, {
+    subtree: true,
+    childList: true,
+    attributes: false,
+  });
+}
+
 function applySettings(settings: PageSettings): void {
   const html = document.documentElement;
+  invalidateAnalysisCache();
+
   html.setAttribute(BASE_ATTR, "true");
   html.classList.remove(
     "theme-default",
@@ -59,9 +286,12 @@ function applySettings(settings: PageSettings): void {
   if (settings.distractionReduction) {
     html.setAttribute("data-neuro-inclusive-distract", "true");
     ensureDistractionEl().textContent = DISTRACTION_CSS;
+    applyDistractionReductionNow(true);
+    ensureDistractionObserver();
   } else {
     html.removeAttribute("data-neuro-inclusive-distract");
     if (distractionEl) distractionEl.textContent = "";
+    restoreDistractionElements();
   }
 
   ensureStyleEl().textContent = buildThemeCss(
@@ -78,17 +308,6 @@ function applySettings(settings: PageSettings): void {
     removeFocusOverlay();
   }
 
-  // Pause autoplay videos when distraction reduction is on
-  if (settings.distractionReduction) {
-    document.querySelectorAll("video[autoplay]").forEach((v) => {
-      try {
-        (v as HTMLVideoElement).pause();
-      } catch {
-        /* ignore */
-      }
-    });
-  }
-
   document.querySelectorAll(".neuro-inclusive-main").forEach((n) => {
     n.classList.remove("neuro-inclusive-main");
   });
@@ -99,6 +318,9 @@ function applySettings(settings: PageSettings): void {
 
   applyReadingRuler(settings.readingRuler);
   applyBionicReading(settings.bionicReading);
+  if (settings.readabilityMode || settings.distractionReduction) {
+    void getPageAnalysis(true);
+  }
 }
 
 // BIONIC READING
@@ -200,13 +422,28 @@ function applyReadingRuler(enabled: boolean) {
   }
 }
 
-function removeFocusOverlay(): void {
-  document.getElementById(FOCUS_ID)?.remove();
+function ensureFocusOverlay(): HTMLDivElement {
+  let hole = document.getElementById(FOCUS_ID) as HTMLDivElement | null;
+  if (!hole) {
+    hole = document.createElement("div");
+    hole.id = FOCUS_ID;
+    hole.setAttribute("role", "presentation");
+    hole.style.cssText = `
+      position: fixed;
+      z-index: 2147483640;
+      pointer-events: none;
+      box-shadow: 0 0 0 9999px rgba(0,0,0,0.55);
+      border-radius: 4px;
+      transition: box-shadow 0.25s ease;
+    `;
+    document.documentElement.appendChild(hole);
+  }
+  return hole;
 }
 
-function showFocusOverlay(): void {
-  removeFocusOverlay();
-  const main = estimateMainElement();
+function positionFocusOverlay(): void {
+  const main = focusMainEl && focusMainEl.isConnected ? focusMainEl : estimateMainElement();
+  focusMainEl = main;
   const rect = main?.getBoundingClientRect() ?? {
     top: 64,
     left: 24,
@@ -214,23 +451,52 @@ function showFocusOverlay(): void {
     height: window.innerHeight - 128,
   };
 
+  const hole = ensureFocusOverlay();
   const pad = 12;
-  const hole = document.createElement("div");
-  hole.id = FOCUS_ID;
-  hole.setAttribute("role", "presentation");
-  hole.style.cssText = `
-    position: fixed;
-    top: ${rect.top - pad}px;
-    left: ${rect.left - pad}px;
-    width: ${rect.width + pad * 2}px;
-    height: ${rect.height + pad * 2}px;
-    z-index: 2147483640;
-    pointer-events: none;
-    box-shadow: 0 0 0 9999px rgba(0,0,0,0.55);
-    border-radius: 4px;
-    transition: box-shadow 0.25s ease;
-  `;
-  document.documentElement.appendChild(hole);
+  hole.style.top = `${rect.top - pad}px`;
+  hole.style.left = `${rect.left - pad}px`;
+  hole.style.width = `${rect.width + pad * 2}px`;
+  hole.style.height = `${rect.height + pad * 2}px`;
+}
+
+function onFocusViewportChange() {
+  if (focusRaf) return;
+  focusRaf = window.requestAnimationFrame(() => {
+    focusRaf = 0;
+    positionFocusOverlay();
+  });
+}
+
+function attachFocusListeners(): void {
+  if (focusListenersAttached) return;
+  focusListenersAttached = true;
+  window.addEventListener("scroll", onFocusViewportChange, true);
+  window.addEventListener("resize", onFocusViewportChange);
+}
+
+function detachFocusListeners(): void {
+  if (!focusListenersAttached) return;
+  focusListenersAttached = false;
+  window.removeEventListener("scroll", onFocusViewportChange, true);
+  window.removeEventListener("resize", onFocusViewportChange);
+  if (focusRaf) {
+    window.cancelAnimationFrame(focusRaf);
+    focusRaf = 0;
+  }
+}
+
+function removeFocusOverlay(): void {
+  detachFocusListeners();
+  focusMainEl = null;
+  document.getElementById(FOCUS_ID)?.remove();
+}
+
+function showFocusOverlay(): void {
+  focusMainEl = estimateMainElement();
+  const hole = ensureFocusOverlay();
+  hole.style.display = "block";
+  positionFocusOverlay();
+  attachFocusListeners();
 }
 
 function ensureSimplifiedPanel(): HTMLDivElement {
@@ -274,6 +540,8 @@ const TOOLTIP_BTN_ID = "neuro-explain-btn";
 const TOOLTIP_BUBBLE_ID = "neuro-explain-bubble";
 
 let currentApiBase = "http://localhost:3000";
+let explainRequestId = 0;
+let explainHideTimer: number | null = null;
 
 function ensureExplainBtn() {
   let el = document.getElementById(TOOLTIP_BTN_ID) as HTMLButtonElement | null;
@@ -300,7 +568,9 @@ function ensureExplainBtn() {
       const sel = window.getSelection();
       if (!sel || !sel.toString().trim()) return;
       const text = sel.toString().trim();
+      const requestId = ++explainRequestId;
       el!.textContent = "🤔 Thinking...";
+      el!.disabled = true;
       
       try {
         const res = (await chrome.runtime.sendMessage({
@@ -308,6 +578,7 @@ function ensureExplainBtn() {
           text,
           apiBase: currentApiBase,
         })) as BackgroundResponse;
+        if (requestId !== explainRequestId) return;
 
         if (res.ok && res.definition?.trim()) {
           showExplainBubble(res.definition, el!.style.left, el!.style.top);
@@ -319,10 +590,16 @@ function ensureExplainBtn() {
           showExplainBubble(hint, el!.style.left, el!.style.top);
         }
       } catch (e) {
-         showExplainBubble("Network error.", el!.style.left, el!.style.top);
+        if (requestId !== explainRequestId) return;
+        const err = e instanceof Error ? e.message : "Network error";
+        showExplainBubble(`${localDefine(text)} (${err})`, el!.style.left, el!.style.top);
+      } finally {
+        if (requestId === explainRequestId) {
+          el!.style.display = "none";
+          el!.textContent = "🧠 Explain";
+          el!.disabled = false;
+        }
       }
-      el!.style.display = "none";
-      el!.textContent = "🧠 Explain";
     });
     
     document.documentElement.appendChild(el);
@@ -354,9 +631,13 @@ function showExplainBubble(text: string, left: string, top: string) {
   el.style.left = left;
   el.style.top = `calc(${top} + 30px)`;
   el.style.display = "block";
-  
-  setTimeout(() => {
+
+  if (explainHideTimer) {
+    window.clearTimeout(explainHideTimer);
+  }
+  explainHideTimer = window.setTimeout(() => {
     el!.style.display = "none";
+    explainHideTimer = null;
   }, 5000);
 }
 
@@ -365,30 +646,20 @@ document.addEventListener("mouseup", () => {
   const btn = ensureExplainBtn();
   const selected =
     sel && sel.rangeCount > 0 ? sel.toString().trim() : "";
-  if (selected.length > 0 && selected.length < 150) {
+    if (selected.length > 0 && selected.length <= MAX_EXPLAIN_SELECTION) {
      const range = sel!.getRangeAt(0);
      const rect = range.getBoundingClientRect();
      btn.style.left = `${rect.right + window.scrollX + 5}px`;
      btn.style.top = `${rect.top + window.scrollY - 20}px`;
      btn.style.display = "block";
   } else {
-     // Check if we are clicking the balloon itself
-     if (document.activeElement?.id !== TOOLTIP_BTN_ID) {
-         btn.style.display = "none";
-     }
+      btn.style.display = "none";
   }
 });
 
 function collectDomStats(): DomStats {
   try {
-    return {
-      images: document.images.length,
-      iframes: document.querySelectorAll("iframe").length,
-      videos: document.querySelectorAll("video").length,
-      buttons: document.querySelectorAll("button").length,
-      links: document.querySelectorAll("a").length,
-      maxDepthSample: sampleDomDepth(),
-    };
+    return getPageAnalysis().domStats;
   } catch {
     return {
       images: 0,
@@ -396,6 +667,12 @@ function collectDomStats(): DomStats {
       videos: 0,
       buttons: 0,
       links: 0,
+      headings: 0,
+      popups: 0,
+      sidebars: 0,
+      denseTextBlocks: 0,
+      textDensity: 0,
+      difficultTerms: 0,
       maxDepthSample: 0,
     };
   }
@@ -409,11 +686,16 @@ chrome.runtime.onMessage.addListener(
   ) => {
     try {
       if (msg.type === "GET_PAGE_TEXT") {
-        const text = extractVisibleText();
+        const analysis = getPageAnalysis(true);
+        const text = analysis.prioritizedText || analysis.text;
         return sendResponse({ ok: true, text });
       }
       if (msg.type === "GET_DOM_STATS") {
         return sendResponse({ ok: true, domStats: collectDomStats() });
+      }
+      if (msg.type === "GET_PAGE_ANALYSIS") {
+        const analysis = getPageAnalysis(true);
+        return sendResponse({ ok: true, analysis });
       }
       if (msg.type === "APPLY_SETTINGS") {
         currentApiBase = (msg.apiBase?.trim() || "http://localhost:3000").replace(/\/$/, "");

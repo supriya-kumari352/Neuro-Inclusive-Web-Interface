@@ -20,12 +20,13 @@ function mockSimplify(text: string): string {
 }
 
 router.post("/", async (req, res) => {
+  let clipped = "";
   try {
     const text = typeof req.body?.text === "string" ? req.body.text : "";
-    if (!text.trim()) {
+    clipped = text.slice(0, MAX_IN).trim();
+    if (!clipped) {
       return res.status(400).json({ error: "Missing text" });
     }
-    const clipped = text.slice(0, MAX_IN);
 
     // Fallback when Gemini is not configured or unavailable
     if (!isGeminiConfigured()) {
@@ -42,20 +43,30 @@ router.post("/", async (req, res) => {
         `${simplifySystem}\n\n${simplifyUser(clipped)}`
       );
       const out = result.response.text();
-      return res.json({ simplified: out.trim() });
+      const simplified = out.trim();
+      if (!simplified) {
+        return res.json({
+          simplified: mockSimplify(clipped),
+          mock: true,
+          reason: "Gemini returned empty output — using local fallback",
+        });
+      }
+      return res.json({ simplified });
     } catch (apiErr) {
       // Gemini call failed (quota, network, etc.) — return mock instead of 500
-      console.warn("simplify: Gemini failed, using fallback:", (apiErr as Error).message);
+      console.warn("simplify: Gemini failed, using fallback");
       return res.json({
         simplified: mockSimplify(clipped),
         mock: true,
-        reason: `Gemini unavailable: ${(apiErr as Error).message?.slice(0, 120)}`,
+        reason: "Gemini unavailable — using local fallback",
       });
     }
   } catch (e) {
     console.error("simplify", e);
-    return res.status(500).json({
-      error: e instanceof Error ? e.message : "Simplify failed",
+    return res.json({
+      simplified: mockSimplify(clipped),
+      mock: true,
+      reason: "Server error — using local fallback",
     });
   }
 });

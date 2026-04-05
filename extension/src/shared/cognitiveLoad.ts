@@ -14,6 +14,8 @@ export type CognitiveLoadResult = {
     paragraphLength: number;
     syllableLoad: number;
     clutter: number;
+    headingDensity: number;
+    jargonLoad: number;
   };
 };
 
@@ -79,14 +81,31 @@ function textComplexityScore(text: string): {
 
 function clutterScore(stats: DomStats | undefined): number {
   if (!stats) return 20;
-  const { images, iframes, videos, buttons, links, maxDepthSample } = stats;
+  const {
+    images,
+    iframes,
+    videos,
+    buttons,
+    links,
+    maxDepthSample,
+    popups = 0,
+    sidebars = 0,
+    denseTextBlocks = 0,
+    textDensity = 0,
+    difficultTerms = 0,
+  } = stats;
   const raw =
-    images * 0.4 +
+    images * 0.35 +
     iframes * 3 +
     videos * 2 +
-    buttons * 0.15 +
-    links * 0.08 +
-    maxDepthSample * 1.2;
+    buttons * 0.12 +
+    links * 0.06 +
+    maxDepthSample * 1.2 +
+    popups * 8 +
+    sidebars * 4 +
+    denseTextBlocks * 3 +
+    Math.max(0, (textDensity - 18) * 1.2) +
+    difficultTerms * 2;
   return Math.min(100, Math.max(0, raw));
 }
 
@@ -103,8 +122,15 @@ export function computeCognitiveLoad(
   const sentenceComplexity = Math.min(100, t.avgWordsPerSentence * 4);
   const paragraphLength = Math.min(100, t.avgParagraphLen / 3);
   const syllableLoad = Math.min(100, t.avgSyllablesPerWord * 40);
+  const headingDensity = Math.min(100, (domStats?.headings ?? 0) * 8);
+  const jargonLoad = Math.min(100, (domStats?.difficultTerms ?? 0) * 7);
 
-  const combined = t.scorePart * 0.55 + c * 0.35 + syllableLoad * 0.1;
+  const combined =
+    t.scorePart * 0.48 +
+    c * 0.32 +
+    syllableLoad * 0.1 +
+    headingDensity * 0.05 +
+    jargonLoad * 0.05;
   const score = Math.round(Math.min(100, Math.max(0, combined)));
 
   return {
@@ -114,6 +140,8 @@ export function computeCognitiveLoad(
       paragraphLength: Math.round(paragraphLength),
       syllableLoad: Math.round(syllableLoad),
       clutter: Math.round(c),
+      headingDensity: Math.round(headingDensity),
+      jargonLoad: Math.round(jargonLoad),
     },
   };
 }

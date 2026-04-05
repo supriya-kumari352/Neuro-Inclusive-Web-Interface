@@ -1,20 +1,26 @@
 import { Router } from "express";
 import { getModel, isGeminiConfigured } from "../lib/gemini.js";
+import { defineSystem, defineUser } from "../lib/prompts.js";
 
 const router = Router();
 const MAX_IN = 2000;
 
 function mockDefine(text: string): string {
-  return `(Mock Definition) '${text.slice(0, 50)}' is a complex term often used in this context.`;
+  const term = text.slice(0, 80).trim();
+  if (!term) {
+    return "(Offline) Select a word or short phrase to explain.";
+  }
+  return `(Offline) ${term}: short explanation unavailable right now. Enable the API for a richer definition.`;
 }
 
 router.post("/", async (req, res) => {
+  let clipped = "";
   try {
     const text = typeof req.body?.text === "string" ? req.body.text : "";
-    if (!text.trim()) {
+    clipped = text.slice(0, MAX_IN).trim();
+    if (!clipped) {
       return res.status(400).json({ error: "Missing text" });
     }
-    const clipped = text.slice(0, MAX_IN);
 
     if (!isGeminiConfigured()) {
       return res.json({
@@ -26,28 +32,30 @@ router.post("/", async (req, res) => {
 
     try {
       const model = getModel();
-      const prompt = `You are a helpful dictionary assistant for neurodivergent users. 
-Provide a very short, concrete 'Explain Like I'm 5' definition for the following word or phrase. 
-Keep it to exactly 1 or 2 simple sentences max, using basic vocabulary. Do not use complex jargon.
-
-Term to define:
-"${clipped}"`;
-      
-      const result = await model.generateContent(prompt);
+      const result = await model.generateContent(`${defineSystem}\n\n${defineUser(clipped)}`);
       const out = result.response.text().trim();
+      if (!out) {
+        return res.json({
+          definition: mockDefine(clipped),
+          mock: true,
+          reason: "Gemini returned empty output — using local fallback",
+        });
+      }
       return res.json({ definition: out });
     } catch (apiErr) {
-      console.warn("define: Gemini failed, using fallback:", (apiErr as Error).message);
+      console.warn("define: Gemini failed, using fallback");
       return res.json({
         definition: mockDefine(clipped),
         mock: true,
-        reason: `Gemini unavailable: ${(apiErr as Error).message?.slice(0, 120)}`,
+        reason: "Gemini unavailable — using local fallback",
       });
     }
   } catch (e) {
     console.error("define", e);
-    return res.status(500).json({
-      error: e instanceof Error ? e.message : "Define failed",
+    return res.json({
+      definition: mockDefine(clipped),
+      mock: true,
+      reason: "Server error — using local fallback",
     });
   }
 });

@@ -125,6 +125,29 @@ async function run() {
     assert(typeof d.reason === "string", "Response has reason string");
   }
 
+  // Define: missing text → 400
+  {
+    const r = await fetch(`${API}/api/define`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    assert(r.status === 400, "POST /api/define empty → 400");
+  }
+
+  // Define: valid text → 200
+  {
+    const r = await fetch(`${API}/api/define`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text: "adenosine triphosphate" }),
+    });
+    assert(r.ok, "POST /api/define with text → 200");
+    const d = (await r.json()) as { definition?: string };
+    assert(typeof d.definition === "string", "Response has definition string");
+    assert((d.definition ?? "").trim().length > 0, "Definition text is non-empty");
+  }
+
   console.log(`\n  Results: ${passed} passed, ${failed} failed\n`);
   process.exit(failed > 0 ? 1 : 0);
 }

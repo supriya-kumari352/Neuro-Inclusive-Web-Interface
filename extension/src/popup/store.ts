@@ -5,6 +5,21 @@ import type { ProfileId } from "../shared/profiles.js";
 import { profileToSettings } from "../shared/profiles.js";
 
 const STORAGE_KEY = "neuro-inclusive-settings-v1";
+const DEFAULT_API_BASE = "http://localhost:3000";
+
+function normalizeApiBase(v: string): string {
+  const trimmed = v.trim();
+  if (!trimmed) return DEFAULT_API_BASE;
+  try {
+    const u = new URL(trimmed);
+    if (u.protocol !== "http:" && u.protocol !== "https:") {
+      return DEFAULT_API_BASE;
+    }
+    return trimmed.replace(/\/+$/, "");
+  } catch {
+    return DEFAULT_API_BASE;
+  }
+}
 
 export type AppState = {
   apiBase: string;
@@ -62,7 +77,7 @@ const defaultSettings: Pick<
   | "cognitiveFactors"
   | "useServerCognitive"
 > = {
-  apiBase: "http://localhost:3000",
+  apiBase: DEFAULT_API_BASE,
   profile: "none",
   theme: "default",
   fontSizePx: 16,
@@ -100,7 +115,7 @@ function toPageSettings(s: AppState): PageSettings {
 export const useStore = create<AppState>((set, get) => ({
   ...defaultSettings,
   status: "",
-  setApiBase: (apiBase) => set({ apiBase }),
+  setApiBase: (apiBase) => set({ apiBase: apiBase.trimStart() }),
   setProfile: (profile) => {
     const extra = profileToSettings(profile);
     set((state) => ({
@@ -122,7 +137,14 @@ export const useStore = create<AppState>((set, get) => ({
     const r = await chrome.storage.sync.get(STORAGE_KEY);
     const raw = r[STORAGE_KEY] as Partial<AppState> | undefined;
     if (raw && typeof raw === "object") {
-      set({ ...defaultSettings, ...raw });
+      set({
+        ...defaultSettings,
+        ...raw,
+        apiBase:
+          typeof raw.apiBase === "string"
+            ? normalizeApiBase(raw.apiBase)
+            : DEFAULT_API_BASE,
+      });
     }
   },
   persist: async () => {

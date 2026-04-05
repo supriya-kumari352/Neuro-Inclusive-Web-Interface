@@ -1,18 +1,83 @@
-import { useEffect, useCallback } from "react";
+import { useEffect, useCallback, useState } from "react";
 import { useStore, getPageSettingsFromStore } from "./store.js";
 import { sendToActiveTab } from "./tab.js";
-import type { BackgroundRequest, BackgroundResponse } from "../shared/messages.js";
+import type {
+  BackgroundRequest,
+  BackgroundResponse,
+  DomStats,
+  PageAnalysis,
+} from "../shared/messages.js";
 
 import { computeCognitiveLoad } from "../shared/cognitiveLoad.js";
 import { localSimplify, localSummarize } from "../shared/localAiFallback.js";
 import { PROFILE_LIST } from "../shared/profiles.js";
 
+const DEFAULT_API_BASE = "http://localhost:3000";
+
+function resolveApiBase(v: string): string {
+  const trimmed = v.trim().replace(/\/+$/, "");
+  if (!trimmed) return DEFAULT_API_BASE;
+  try {
+    const u = new URL(trimmed);
+    if (u.protocol === "http:" || u.protocol === "https:") {
+      return trimmed;
+    }
+  } catch {
+    // Fall through to default.
+  }
+  return DEFAULT_API_BASE;
+}
+
 async function bgApi(msg: BackgroundRequest): Promise<BackgroundResponse> {
-  return chrome.runtime.sendMessage(msg);
+  try {
+    return await chrome.runtime.sendMessage(msg);
+  } catch (e) {
+    return {
+      ok: false,
+      error: e instanceof Error ? e.message : "Background message failed",
+    };
+  }
+}
+
+const EMPTY_DOM_STATS: DomStats = {
+  images: 0,
+  iframes: 0,
+  videos: 0,
+  buttons: 0,
+  links: 0,
+  headings: 0,
+  popups: 0,
+  sidebars: 0,
+  denseTextBlocks: 0,
+  textDensity: 0,
+  difficultTerms: 0,
+  maxDepthSample: 0,
+};
+
+async function getPageAnalysisFromActiveTab(): Promise<PageAnalysis | null> {
+  const analysisRes = await sendToActiveTab({ type: "GET_PAGE_ANALYSIS" });
+  if (analysisRes.ok && analysisRes.analysis) {
+    return analysisRes.analysis;
+  }
+
+  const [textRes, domRes] = await Promise.all([
+    sendToActiveTab({ type: "GET_PAGE_TEXT" }),
+    sendToActiveTab({ type: "GET_DOM_STATS" }),
+  ]);
+  if (!textRes.ok || !textRes.text) return null;
+
+  return {
+    text: textRes.text,
+    prioritizedText: textRes.text,
+    blocks: [],
+    difficultTerms: [],
+    domStats: domRes.ok && domRes.domStats ? domRes.domStats : EMPTY_DOM_STATS,
+  };
 }
 
 export default function App() {
   const s = useStore();
+  const [isApplying, setIsApplying] = useState(false);
 
   useEffect(() => {
     void useStore.getState().hydrate();
@@ -40,44 +105,51 @@ export default function App() {
   ]);
 
   const applyToPage = useCallback(async () => {
+    if (isApplying) return;
+    setIsApplying(true);
     s.setStatus("Applying…");
     const settings = getPageSettingsFromStore();
-    const r = await sendToActiveTab({
-      type: "APPLY_SETTINGS",
-      settings,
-      apiBase: s.apiBase,
-    });
-    s.setStatus(r.ok ? "Applied to page." : r.error ?? "Failed");
-  }, [s]);
+    const apiBase = resolveApiBase(s.apiBase);
+    try {
+      const r = await sendToActiveTab({
+        type: "APPLY_SETTINGS",
+        settings,
+        apiBase,
+      });
+      s.setStatus(r.ok ? "Applied to page." : r.error ?? "Failed");
+    } finally {
+      setIsApplying(false);
+    }
+  }, [isApplying, s]);
 
   const scorePage = useCallback(async () => {
     s.setStatus("Scoring…");
-    const [tRes, dRes] = await Promise.all([
-      sendToActiveTab({ type: "GET_PAGE_TEXT" }),
-      sendToActiveTab({ type: "GET_DOM_STATS" }),
-    ]);
-    if (!tRes.ok || !tRes.text) {
-      s.setStatus(tRes.ok === false ? tRes.error : "No text");
+    const analysis = await getPageAnalysisFromActiveTab();
+    if (!analysis) {
+      s.setStatus("No readable text on this page.");
       return;
     }
-    const dom = dRes.ok ? dRes.domStats : undefined;
-    const local = computeCognitiveLoad(tRes.text, dom);
+
+    const scoreText = analysis.prioritizedText || analysis.text;
+    if (!scoreText.trim()) {
+      s.setStatus("No visible text to score.");
+      return;
+    }
+
+    const dom = analysis.domStats;
+    const local = computeCognitiveLoad(scoreText, dom);
     let before = local.score;
-    let factors = `Local: sentences ${local.factors.sentenceComplexity}, clutter ${local.factors.clutter}`;
+    let factors =
+      `Local: sentences ${local.factors.sentenceComplexity}, clutter ${local.factors.clutter}, ` +
+      `headings ${dom.headings ?? 0}, difficult terms ${analysis.difficultTerms.length}`;
+    const apiBase = resolveApiBase(s.apiBase);
 
     if (s.useServerCognitive) {
       const api = await bgApi({
         type: "API_COGNITIVE_LOAD",
-        text: tRes.text,
-        domStats: dom ?? {
-          images: 0,
-          iframes: 0,
-          videos: 0,
-          buttons: 0,
-          links: 0,
-          maxDepthSample: 0,
-        },
-        apiBase: s.apiBase,
+        text: scoreText,
+        domStats: dom ?? EMPTY_DOM_STATS,
+        apiBase,
       });
       if (api.ok && api.score != null) {
         before = Math.round((before + api.score) / 2);
@@ -90,46 +162,81 @@ export default function App() {
   }, [s]);
 
   const simplifyPage = useCallback(async () => {
-    s.setStatus("Fetching text…");
-    const tRes = await sendToActiveTab({ type: "GET_PAGE_TEXT" });
-    const dRes = await sendToActiveTab({ type: "GET_DOM_STATS" });
-    if (!tRes.ok || !tRes.text) {
-      s.setStatus(tRes.ok === false ? tRes.error : "No text");
+    s.setStatus("Analyzing page…");
+    const analysis = await getPageAnalysisFromActiveTab();
+    if (!analysis) {
+      s.setStatus("No readable text on this page.");
       return;
     }
-    const dom = dRes.ok ? dRes.domStats : undefined;
-    const beforeScore = computeCognitiveLoad(tRes.text, dom).score;
 
-    s.setStatus("Simplifying…");
-    const api = await bgApi({
-      type: "API_SIMPLIFY",
-      text: tRes.text,
-      apiBase: s.apiBase,
-    });
-    let simplified = api.ok ? api.simplified?.trim() : "";
+    const dom = analysis.domStats;
+    const sourceText = (analysis.prioritizedText || analysis.text).trim();
+    if (!sourceText) {
+      s.setStatus("No visible text to simplify.");
+      return;
+    }
+
+    const beforeScore = computeCognitiveLoad(sourceText, dom).score;
+    const complexitySignals = [
+      beforeScore >= 48,
+      analysis.difficultTerms.length >= 4,
+      (dom.denseTextBlocks ?? 0) >= 2,
+      (dom.popups ?? 0) + (dom.sidebars ?? 0) >= 2,
+      sourceText.length >= 1400,
+    ];
+    const needsAi = complexitySignals.filter(Boolean).length >= 2 || beforeScore >= 58;
+
+    s.setStatus(needsAi ? "Simplifying with AI…" : "Using deterministic simplification…");
+    const apiBase = resolveApiBase(s.apiBase);
+    const aiInput = sourceText.slice(0, 6000);
+    let simplified = "";
+    let usedAi = false;
     let statusNote = "";
-    if (!simplified) {
-      simplified = localSimplify(tRes.text);
-      statusNote =
-        api.ok === false
-          ? ` (offline fallback: ${api.error})`
-          : " (offline fallback)";
+
+    if (needsAi) {
+      const api = await bgApi({
+        type: "API_SIMPLIFY",
+        text: aiInput,
+        apiBase,
+      });
+      const apiSimplified =
+        api.ok && typeof api.simplified === "string"
+          ? api.simplified.trim()
+          : undefined;
+
+      if (apiSimplified) {
+        simplified = apiSimplified;
+        usedAi = true;
+      } else {
+        simplified = localSimplify(sourceText);
+        statusNote =
+          api.ok === false
+            ? ` (fallback: ${api.error})`
+            : typeof api.simplified !== "string"
+              ? " (fallback: invalid API response)"
+              : " (fallback: empty API output)";
+      }
+    } else {
+      simplified = localSimplify(sourceText);
+      statusNote = " (heuristic path: low complexity, AI skipped)";
     }
 
     const afterScore = computeCognitiveLoad(simplified, dom).score;
-    s.setLastSimplified(tRes.text, simplified);
+    s.setLastSimplified(sourceText, simplified);
     s.setSimplifiedView("simplified");
     s.setCognitive(
       beforeScore,
       afterScore,
-      `Sentence/paragraph heuristics + clutter ${dom ? "included" : "n/a"}`
+      `Heuristic pipeline: score ${beforeScore}, difficult terms ${analysis.difficultTerms.length}, AI ${usedAi ? "used" : "skipped"}`
     );
     await sendToActiveTab({
       type: "SHOW_SIMPLIFIED",
       simplified,
       show: true,
     });
-    s.setStatus(`Simplified. Toggle Original / Simplified below.${statusNote}`);
+    s.setStatus(
+      `${usedAi ? "Simplified with AI" : "Simplified deterministically"}. Toggle Original / Simplified below.${statusNote}`
+    );
   }, [s]);
 
   const toggleView = useCallback(async () => {
@@ -139,6 +246,10 @@ export default function App() {
     const st = useStore.getState();
     const text =
       next === "simplified" ? st.lastSimplified : st.lastOriginalSample;
+    if (!text.trim()) {
+      useStore.getState().setStatus("No simplified text yet. Run Simplify page first.");
+      return;
+    }
     await sendToActiveTab({
       type: "SHOW_SIMPLIFIED",
       simplified: text,
@@ -149,25 +260,48 @@ export default function App() {
   const summarize = useCallback(
     async (mode: "tldr" | "bullets") => {
       s.setStatus("Summarizing…");
-      const tRes = await sendToActiveTab({ type: "GET_PAGE_TEXT" });
-      if (!tRes.ok || !tRes.text) {
-        s.setStatus(tRes.ok === false ? tRes.error : "No text");
+      const analysis = await getPageAnalysisFromActiveTab();
+      if (!analysis) {
+        s.setStatus("No readable text on this page.");
         return;
       }
+      const sourceText = (analysis.prioritizedText || analysis.text).trim();
+      if (!sourceText) {
+        s.setStatus("No text to summarize.");
+        return;
+      }
+      const apiBase = resolveApiBase(s.apiBase);
       const api = await bgApi({
         type: "API_SUMMARIZE",
-        text: tRes.text,
+        text: sourceText.slice(0, 6000),
         mode,
-        apiBase: s.apiBase,
+        apiBase,
       });
-      let summary = api.ok ? api.summary?.trim() : "";
-      if (!summary) {
-        summary = localSummarize(tRes.text, mode);
+      const apiSummary =
+        api.ok && typeof api.summary === "string" ? api.summary.trim() : undefined;
+      let summary = apiSummary ?? "";
+      if (!api.ok || typeof api.summary !== "string" || !apiSummary) {
+        summary = localSummarize(sourceText, mode);
         s.setSummaryText(summary);
-        s.setStatus(
-          (mode === "tldr" ? "TL;DR (offline fallback" : "Bullets (offline fallback") +
-            (api.ok === false ? `: ${api.error})` : ").")
-        );
+        if (!api.ok) {
+          s.setStatus(
+            mode === "tldr"
+              ? `TL;DR (offline fallback: ${api.error})`
+              : `Bullets (offline fallback: ${api.error})`
+          );
+        } else if (typeof api.summary !== "string") {
+          s.setStatus(
+            mode === "tldr"
+              ? "TL;DR (offline fallback: invalid API response)."
+              : "Bullets (offline fallback: invalid API response)."
+          );
+        } else {
+          s.setStatus(
+            mode === "tldr"
+              ? "TL;DR (offline fallback: empty API output)."
+              : "Bullets (offline fallback: empty API output)."
+          );
+        }
         return;
       }
       s.setSummaryText(summary);
@@ -186,6 +320,7 @@ export default function App() {
         type="text"
         value={s.apiBase}
         onChange={(e) => s.setApiBase(e.target.value)}
+        onBlur={() => s.setApiBase(resolveApiBase(s.apiBase))}
         placeholder="http://localhost:3000"
         aria-label="API base URL"
       />
@@ -310,7 +445,7 @@ export default function App() {
       <div className="divider" />
 
       <div className="row">
-        <button type="button" onClick={() => void applyToPage()}>
+        <button type="button" onClick={() => void applyToPage()} disabled={isApplying}>
           Apply to page
         </button>
         <button type="button" className="secondary" onClick={() => void scorePage()}>

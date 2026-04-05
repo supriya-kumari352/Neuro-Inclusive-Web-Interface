@@ -11,7 +11,12 @@
     "build:extension": "npm run build --workspace extension",
     "build:server": "npm run build --workspace server",
     "eval": "node scripts/evaluate.mjs",
-    "test:unit": "node --import tsx tests/test-cognitive-load.ts && node --import tsx tests/test-profiles.ts",
+    "smoke-test": "node scripts/smoke-test.mjs",
+    "test:cognitive-load": "node --import tsx tests/test-cognitive-load.ts",
+    "test:data-structures": "node --import tsx tests/test-data-structures.ts",
+    "test:profiles": "node --import tsx tests/test-profiles.ts",
+    "test:fallbacks": "node --import tsx tests/test-fallbacks.ts",
+    "test:unit": "npm run test:cognitive-load && npm run test:data-structures && npm run test:profiles && npm run test:fallbacks",
     "test:api": "node --import tsx tests/test-api.ts",
     "test": "npm run test:unit"
   }
