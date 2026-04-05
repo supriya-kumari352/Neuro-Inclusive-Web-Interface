@@ -41,9 +41,9 @@ const ANALYSIS_TTL_MS = 1200;
 const MAX_TEXT_FOR_REMOTE = 6000;
 const MAX_TEXT_FOR_LOCAL = 12000;
 const MAX_EXPLAIN_SELECTION = 300;
-const FOCUS_SPOTLIGHT_RADIUS = 170;
-const FOCUS_EDGE_SOFTNESS = 54;
-const FOCUS_DIM_ALPHA = 0.62;
+const FOCUS_SPOTLIGHT_RADIUS = 220;
+const FOCUS_EDGE_SOFTNESS = 78;
+const FOCUS_DIM_ALPHA = 0.42;
 const FLOW_PROGRESS_ID = "neuro-inclusive-flow-progress";
 const FLOW_PROGRESS_FILL_ID = "neuro-inclusive-flow-progress-fill";
 const FLOW_MARKER_ID = "neuro-inclusive-flow-marker";
@@ -51,8 +51,12 @@ const FLOW_CURRENT_ATTR = "data-neuro-inclusive-flow-current";
 const FLOW_RESUME_ATTR = "data-neuro-inclusive-flow-resume";
 const FLOW_MIN_CHARS = 90;
 const FLOW_SYNC_MS = 900;
+const FLOW_UPDATE_MIN_MS = 140;
 const FLOW_STORAGE_KEY = "neuro-inclusive-reading-flow-v1";
 const MAX_STRUCTURED_SECTIONS = 8;
+const DISTRACTION_REFRESH_MIN_MS = 850;
+const CLUTTER_RE =
+  /\b(nav|menu|toolbar|header|footer|sidebar|rail|recommend|related|promo|advert|sponsor|cookie|consent|subscribe|newsletter|share|social|widget|trending|upsell|floating|sticky)\b/i;
 
 function localDefineFallback(term: string): string {
   const t = term.trim().slice(0, 200);
@@ -154,13 +158,15 @@ let distractionEl: HTMLStyleElement | null = null;
 let focusListenersAttached = false;
 let focusRaf = 0;
 let focusPointerX = Math.round(window.innerWidth * 0.5);
-let focusPointerY = Math.round(window.innerHeight * 0.35);
+let focusPointerY = Math.round(window.innerHeight * 0.5);
 let cachedAnalysis: PageAnalysis | null = null;
 let cachedAnalysisAt = 0;
 const modifiedDistractionElements = new Set<HTMLElement>();
 const previousStyleByElement = new WeakMap<HTMLElement, string | null>();
 let distractionObserver: MutationObserver | null = null;
 let distractionRefreshRaf = 0;
+let distractionDelayedTimer: number | null = null;
+let distractionLastAppliedAt = 0;
 let currentSettings: PageSettings = {
   theme: "default",
   fontSizePx: 16,
@@ -184,6 +190,8 @@ let flowParagraphs: HTMLElement[] = [];
 let flowCurrentParagraph: HTMLElement | null = null;
 let flowResumeParagraph: HTMLElement | null = null;
 let flowUpdateRaf = 0;
+let flowUpdateTimer: number | null = null;
+let flowLastUpdatedAt = 0;
 let flowLastSavedAt = 0;
 let importanceHeatmapEnabled = false;
 
@@ -472,9 +480,22 @@ function updateReadingFlowNow(): void {
 }
 
 function scheduleReadingFlowUpdate(): void {
+  const now = Date.now();
+  const elapsed = now - flowLastUpdatedAt;
+
+  if (elapsed < FLOW_UPDATE_MIN_MS) {
+    if (flowUpdateTimer != null) return;
+    flowUpdateTimer = window.setTimeout(() => {
+      flowUpdateTimer = null;
+      scheduleReadingFlowUpdate();
+    }, FLOW_UPDATE_MIN_MS - elapsed);
+    return;
+  }
+
   if (flowUpdateRaf) return;
   flowUpdateRaf = window.requestAnimationFrame(() => {
     flowUpdateRaf = 0;
+    flowLastUpdatedAt = Date.now();
     updateReadingFlowNow();
   });
 }
@@ -506,6 +527,11 @@ function disableReadingFlowAssistant(): void {
   if (flowUpdateRaf) {
     window.cancelAnimationFrame(flowUpdateRaf);
     flowUpdateRaf = 0;
+  }
+
+  if (flowUpdateTimer != null) {
+    window.clearTimeout(flowUpdateTimer);
+    flowUpdateTimer = null;
   }
 
   clearFlowHighlights();
@@ -603,6 +629,136 @@ function shouldIgnoreDistractionTarget(el: HTMLElement): boolean {
   return false;
 }
 
+function elementSignature(el: HTMLElement): string {
+  const id = el.id || "";
+  const cls = typeof el.className === "string" ? el.className : "";
+  return `${id} ${cls}`.toLowerCase();
+}
+
+function visibleTextLength(el: HTMLElement): number {
+  return (el.innerText || "").replace(/\s+/g, " ").trim().length;
+}
+
+function isLikelyPrimaryContent(el: HTMLElement): boolean {
+  if (el.matches("main, article, [role='main']")) return true;
+  if (el.querySelector("main, article, [role='main']")) return true;
+
+  const textLen = visibleTextLength(el);
+  const paragraphs = el.querySelectorAll("p").length;
+  const headings = el.querySelectorAll("h1,h2,h3").length;
+
+  if (textLen >= 2200) return true;
+  if (paragraphs >= 4 && textLen >= 900) return true;
+  if (paragraphs >= 2 && headings >= 2 && textLen >= 700) return true;
+  return false;
+}
+
+function collectMainContentAnchors(): HTMLElement[] {
+  const fromTraversal = getClassifiedElements(["main-content", "dense-text"]);
+  const main = estimateMainElement();
+  const semanticMain = Array.from(
+    document.querySelectorAll("main, article, [role='main']")
+  ) as HTMLElement[];
+
+  const out = new Set<HTMLElement>();
+  for (const el of [...fromTraversal, ...semanticMain, ...(main ? [main] : [])]) {
+    if (el && el.isConnected) out.add(el);
+  }
+
+  const ranked = Array.from(out)
+    .filter((el) => {
+      if (isLikelyPrimaryContent(el)) return true;
+      return visibleTextLength(el) >= 320;
+    })
+    .sort((a, b) => visibleTextLength(b) - visibleTextLength(a));
+
+  const top = ranked.slice(0, 3);
+  if (top.length) return top;
+  return main && main.isConnected ? [main] : [];
+}
+
+function buildKeepSet(anchors: HTMLElement[]): Set<HTMLElement> {
+  const keep = new Set<HTMLElement>();
+  for (const anchor of anchors) {
+    let cur: HTMLElement | null = anchor;
+    let depth = 0;
+    while (cur && depth < 14) {
+      keep.add(cur);
+      if (cur === document.body || cur === document.documentElement) break;
+      cur = cur.parentElement as HTMLElement | null;
+      depth++;
+    }
+  }
+  return keep;
+}
+
+function containsAnyKeep(el: HTMLElement, keep: Set<HTMLElement>): boolean {
+  for (const node of keep) {
+    if (el === node || el.contains(node)) return true;
+  }
+  return false;
+}
+
+function classifyClutterAction(
+  el: HTMLElement,
+  aggressive: boolean
+): "hide" | "dim" | null {
+  const rect = el.getBoundingClientRect();
+  if (rect.width <= 0 || rect.height <= 0) return null;
+  if (rect.bottom < 0 || rect.top > window.innerHeight) return null;
+
+  const viewportArea = Math.max(1, window.innerWidth * window.innerHeight);
+  const area = rect.width * rect.height;
+  const role = (el.getAttribute("role") || "").toLowerCase();
+  const tag = el.tagName;
+  const signature = elementSignature(el);
+
+  const links = el.querySelectorAll("a").length;
+  const controls = el.querySelectorAll("button,input,select,textarea,[role='button']").length;
+  const textLen = visibleTextLength(el);
+
+  if (isLikelyPrimaryContent(el)) return null;
+
+  const structural =
+    tag === "NAV" ||
+    tag === "ASIDE" ||
+    tag === "HEADER" ||
+    tag === "FOOTER" ||
+    role === "navigation" ||
+    role === "complementary" ||
+    role === "banner" ||
+    role === "contentinfo" ||
+    CLUTTER_RE.test(signature);
+
+  const touchesCenter =
+    rect.left < window.innerWidth * 0.78 &&
+    rect.right > window.innerWidth * 0.22 &&
+    rect.top < window.innerHeight * 0.78 &&
+    rect.bottom > window.innerHeight * 0.22;
+
+  if (structural && (links >= 4 || controls >= 3 || area > viewportArea * 0.01)) {
+    return aggressive ? "hide" : "dim";
+  }
+
+  if (touchesCenter && textLen < (aggressive ? 1200 : 900) && (links >= 10 || controls >= 6)) {
+    return "hide";
+  }
+
+  if (links >= (aggressive ? 8 : 10) && textLen < 1400) {
+    return aggressive ? "hide" : "dim";
+  }
+
+  if (area < viewportArea * 0.012 && textLen < 140 && (links > 1 || controls > 1)) {
+    return "hide";
+  }
+
+  if (area > viewportArea * 0.24 && textLen < 900) {
+    return "dim";
+  }
+
+  return null;
+}
+
 function storeStyleOnce(el: HTMLElement): void {
   if (!previousStyleByElement.has(el)) {
     previousStyleByElement.set(el, el.getAttribute("style"));
@@ -611,6 +767,7 @@ function storeStyleOnce(el: HTMLElement): void {
 
 function dimDistractionElement(el: HTMLElement): void {
   if (shouldIgnoreDistractionTarget(el) || el.closest("form")) return;
+  if (isLikelyPrimaryContent(el)) return;
   storeStyleOnce(el);
   modifiedDistractionElements.add(el);
   el.style.setProperty("opacity", "0.28", "important");
@@ -621,6 +778,7 @@ function dimDistractionElement(el: HTMLElement): void {
 
 function hideDistractionElement(el: HTMLElement): void {
   if (shouldIgnoreDistractionTarget(el) || el.closest("form")) return;
+  if (isLikelyPrimaryContent(el)) return;
   storeStyleOnce(el);
   modifiedDistractionElements.add(el);
   el.style.setProperty("display", "none", "important");
@@ -634,6 +792,35 @@ function stopDistractionObserver(): void {
     window.cancelAnimationFrame(distractionRefreshRaf);
     distractionRefreshRaf = 0;
   }
+  if (distractionDelayedTimer != null) {
+    window.clearTimeout(distractionDelayedTimer);
+    distractionDelayedTimer = null;
+  }
+  distractionLastAppliedAt = 0;
+}
+
+function scheduleDistractionRefresh(forceAnalysis: boolean): void {
+  const run = () => {
+    if (!document.documentElement.hasAttribute("data-neuro-inclusive-distract")) return;
+    if (forceAnalysis) {
+      invalidateAnalysisCache();
+    }
+    applyDistractionReductionNow(forceAnalysis);
+    distractionLastAppliedAt = Date.now();
+  };
+
+  const now = Date.now();
+  const elapsed = now - distractionLastAppliedAt;
+  if (elapsed >= DISTRACTION_REFRESH_MIN_MS) {
+    run();
+    return;
+  }
+
+  if (distractionDelayedTimer != null) return;
+  distractionDelayedTimer = window.setTimeout(() => {
+    distractionDelayedTimer = null;
+    run();
+  }, DISTRACTION_REFRESH_MIN_MS - elapsed);
 }
 
 function restoreDistractionElements(): void {
@@ -666,7 +853,7 @@ function restoreDistractionElements(): void {
     });
 }
 
-function applyFloatingClutterHeuristic(): void {
+function applyFloatingClutterHeuristic(aggressive: boolean): void {
   const selector = [
     '[style*="position:fixed"]',
     '[style*="position: fixed"]',
@@ -698,15 +885,59 @@ function applyFloatingClutterHeuristic(): void {
       rect.bottom > window.innerHeight * 0.25;
 
     if (touchesCenter || area > viewportArea * 0.22) {
-      hideDistractionElement(el);
+      aggressive ? hideDistractionElement(el) : dimDistractionElement(el);
     } else {
-      dimDistractionElement(el);
+      const action = classifyClutterAction(el, aggressive);
+      if (action === "hide") hideDistractionElement(el);
+      else if (action === "dim") dimDistractionElement(el);
     }
+  }
+}
+
+function applyMainContentIsolation(aggressive: boolean): void {
+  if (!document.body) return;
+
+  const anchors = collectMainContentAnchors();
+  if (!anchors.length) return;
+
+  const keep = buildKeepSet(anchors);
+  const visited = new Set<HTMLElement>();
+  const candidates: HTMLElement[] = [];
+
+  for (const child of Array.from(document.body.children) as HTMLElement[]) {
+    candidates.push(child);
+  }
+
+  for (const anchor of anchors) {
+    let cur: HTMLElement | null = anchor;
+    let depth = 0;
+    while (cur?.parentElement && depth < 8) {
+      const parent = cur.parentElement as HTMLElement;
+      for (const sibling of Array.from(parent.children) as HTMLElement[]) {
+        if (sibling !== cur) candidates.push(sibling);
+      }
+      if (parent === document.body) break;
+      cur = parent;
+      depth++;
+    }
+  }
+
+  for (const el of candidates) {
+    if (visited.has(el)) continue;
+    visited.add(el);
+
+    if (shouldIgnoreDistractionTarget(el) || el.closest("form")) continue;
+    if (containsAnyKeep(el, keep)) continue;
+
+    const action = classifyClutterAction(el, aggressive);
+    if (action === "hide") hideDistractionElement(el);
+    else if (action === "dim") dimDistractionElement(el);
   }
 }
 
 function applyDistractionReductionNow(forceAnalysis = false): void {
   void getPageAnalysis(forceAnalysis);
+  const aggressive = currentSettings.focusMode || currentSettings.theme === "autism";
 
   const hideBySelectors = Array.from(
     document.querySelectorAll(DISTRACTION_HIDE_SELECTOR)
@@ -722,7 +953,8 @@ function applyDistractionReductionNow(forceAnalysis = false): void {
   for (const el of hideByTraversal) hideDistractionElement(el);
   for (const el of dimBySelectors) dimDistractionElement(el);
   for (const el of dimByTraversal) dimDistractionElement(el);
-  applyFloatingClutterHeuristic();
+  applyFloatingClutterHeuristic(aggressive);
+  applyMainContentIsolation(aggressive);
 
   document.querySelectorAll("video[autoplay],audio[autoplay]").forEach((media) => {
     try {
@@ -766,8 +998,7 @@ function ensureDistractionObserver(): void {
     if (distractionRefreshRaf) return;
     distractionRefreshRaf = window.requestAnimationFrame(() => {
       distractionRefreshRaf = 0;
-      invalidateAnalysisCache();
-      applyDistractionReductionNow(true);
+      scheduleDistractionRefresh(false);
     });
   });
 
@@ -795,20 +1026,19 @@ function applySettings(settings: PageSettings): void {
   );
   html.classList.add(`theme-${settings.theme}`);
 
-  if (settings.distractionReduction) {
+  const shouldReduceClutter =
+    settings.distractionReduction || settings.focusMode || settings.theme === "autism";
+
+  if (shouldReduceClutter) {
     html.setAttribute("data-neuro-inclusive-distract", "true");
     ensureDistractionEl().textContent = DISTRACTION_CSS;
-    applyDistractionReductionNow(true);
+    scheduleDistractionRefresh(true);
     ensureDistractionObserver();
   } else {
     html.removeAttribute("data-neuro-inclusive-distract");
     if (distractionEl) distractionEl.textContent = "";
     restoreDistractionElements();
 
-    if (settings.theme === "autism") {
-      // Autism calm mode keeps only core content cues even without full distraction toggle.
-      applyDistractionReductionNow(true);
-    }
   }
 
   applyCalmModeMediaControl(settings.theme);
@@ -968,9 +1198,8 @@ function ensureFocusOverlay(): HTMLDivElement {
       z-index: 2147483640;
       pointer-events: none;
       display: none;
-      background: radial-gradient(circle 170px at 50% 35%, rgba(0,0,0,0), rgba(0,0,0,0.02) 58%, rgba(8,12,16,0.62) 100%);
-      backdrop-filter: blur(1px);
-      transition: background 0.08s linear;
+      background: radial-gradient(circle 300px at 50% 50%, rgba(0,0,0,0) 0px, rgba(0,0,0,0) 220px, rgba(8,12,16,0.42) 300px);
+      will-change: background;
     `;
     document.documentElement.appendChild(hole);
   }
@@ -983,7 +1212,7 @@ function paintFocusOverlay(): void {
   const hole = ensureFocusOverlay();
   const inner = Math.max(24, FOCUS_SPOTLIGHT_RADIUS - FOCUS_EDGE_SOFTNESS);
   const outer = FOCUS_SPOTLIGHT_RADIUS + FOCUS_EDGE_SOFTNESS;
-  hole.style.background = `radial-gradient(circle ${outer}px at ${safeX}px ${safeY}px, rgba(0,0,0,0) 0px, rgba(0,0,0,0.02) ${inner}px, rgba(8,12,16,${FOCUS_DIM_ALPHA}) ${outer}px)`;
+  hole.style.background = `radial-gradient(circle ${outer}px at ${safeX}px ${safeY}px, rgba(0,0,0,0) 0px, rgba(0,0,0,0) ${inner}px, rgba(8,12,16,${FOCUS_DIM_ALPHA}) ${outer}px)`;
 }
 
 function scheduleFocusOverlayPaint(): void {
@@ -995,6 +1224,9 @@ function scheduleFocusOverlayPaint(): void {
 }
 
 function onFocusPointerMove(e: MouseEvent): void {
+  if (Math.abs(e.clientX - focusPointerX) < 2 && Math.abs(e.clientY - focusPointerY) < 2) {
+    return;
+  }
   focusPointerX = e.clientX;
   focusPointerY = e.clientY;
   scheduleFocusOverlayPaint();
@@ -1003,6 +1235,9 @@ function onFocusPointerMove(e: MouseEvent): void {
 function onFocusTouchMove(e: TouchEvent): void {
   const t = e.touches[0];
   if (!t) return;
+  if (Math.abs(t.clientX - focusPointerX) < 2 && Math.abs(t.clientY - focusPointerY) < 2) {
+    return;
+  }
   focusPointerX = t.clientX;
   focusPointerY = t.clientY;
   scheduleFocusOverlayPaint();
@@ -1043,8 +1278,13 @@ function showFocusOverlay(): void {
   const main = estimateMainElement();
   if (main) {
     const rect = main.getBoundingClientRect();
-    focusPointerX = Math.max(24, Math.min(window.innerWidth - 24, rect.left + rect.width * 0.4));
-    focusPointerY = Math.max(24, Math.min(window.innerHeight - 24, rect.top + 84));
+    const centerX = rect.left + rect.width * 0.5;
+    const preferredY = Math.max(rect.top + Math.min(180, rect.height * 0.25), window.innerHeight * 0.45);
+    focusPointerX = Math.max(24, Math.min(window.innerWidth - 24, centerX));
+    focusPointerY = Math.max(24, Math.min(window.innerHeight - 24, preferredY));
+  } else {
+    focusPointerX = Math.round(window.innerWidth * 0.5);
+    focusPointerY = Math.round(window.innerHeight * 0.5);
   }
   const hole = ensureFocusOverlay();
   hole.style.display = "block";

@@ -46,6 +46,52 @@ export function buildThemeCss(
     html[${BASE_ATTR}].theme-dyslexia body {
       background: #fffef6 !important;
       color: #1a1a1a !important;
+      color-scheme: light !important;
+    }
+    html[${BASE_ATTR}].theme-dyslexia :is(main, article, [role="main"], section, .neuro-inclusive-main) {
+      background: #fffef6 !important;
+      color: #1a1a1a !important;
+    }
+    html[${BASE_ATTR}].theme-dyslexia :is(
+      p,
+      li,
+      span,
+      blockquote,
+      figcaption,
+      dt,
+      dd,
+      td,
+      th,
+      h1,
+      h2,
+      h3,
+      h4,
+      h5,
+      h6,
+      label,
+      strong,
+      em,
+      small
+    ) {
+      color: #1a1a1a !important;
+    }
+    html[${BASE_ATTR}].theme-dyslexia a {
+      color: #0b4f9c !important;
+      text-decoration-thickness: 2px !important;
+    }
+    html[${BASE_ATTR}].theme-dyslexia a:visited {
+      color: #5a2f8a !important;
+    }
+    html[${BASE_ATTR}].theme-dyslexia :is(button, input, select, textarea) {
+      color: #1a1a1a !important;
+      background: #fffef6 !important;
+      border-color: #8f8f8f !important;
+    }
+    html[${BASE_ATTR}].theme-dyslexia [style*="color:#fff"],
+    html[${BASE_ATTR}].theme-dyslexia [style*="color: #fff"],
+    html[${BASE_ATTR}].theme-dyslexia [style*="color:rgb(255"],
+    html[${BASE_ATTR}].theme-dyslexia [style*="color: rgb(255"] {
+      color: #1a1a1a !important;
     }
     html[${BASE_ATTR}].theme-autism body {
       background: #eceff1 !important;
