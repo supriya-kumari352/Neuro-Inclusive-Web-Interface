@@ -41,11 +41,11 @@ flowchart LR
     C[Content Script\nDOM Analysis + Styling]
   end
   subgraph API[Node/Express API]
-    R1[/simplify]
-    R2[/summarize]
-    R3[/cognitive-load]
-    R4[/define]
-    R5[/importance-heatmap]
+    R1["/simplify"]
+    R2["/summarize"]
+    R3["/cognitive-load"]
+    R4["/define"]
+    R5["/importance-heatmap"]
     G[Gemini Optional]
   end
 
