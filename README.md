@@ -2,13 +2,6 @@
 
 A production-minded Chrome Extension (Manifest V3) + Node.js API that lowers web reading friction for neurodivergent users (ADHD, dyslexia, autism) through adaptive UI controls, text simplification, summarization, explainability, and cognitive-load scoring.
 
-This README is structured for hackathon evaluation and explicitly addresses:
-
-- potential impact and uniqueness
-- algorithm and architecture quality
-- code quality and maintainability
-- model evaluation and testing evidence
-
 ## 1) Problem and Proposed Impact
 
 ### Problem
@@ -311,64 +304,5 @@ npm run smoke-test
 
 Smoke test confirms all core routes return valid responses in fallback mode when Gemini key is missing.
 
-### B) Synthetic benchmark for simplification
 
-Dataset: `docs/evaluation/synthetic-suite.json` (10 proxy cases across legal/medical/finance/engineering/policy/etc.)
 
-Run benchmark:
-
-```bash
-npm run eval
-```
-
-Output:
-
-- `docs/evaluation/latest-results.json`
-
-Latest generated summary (2026-04-05):
-
-- total cases: 10
-- improved cases: 10
-- improvement rate: 100%
-- mean complexity delta: -11.34%
-- mean words-per-sentence delta: -44.11%
-
-Evaluation protocol details:
-
-- `docs/evaluation/EVALUATION.md`
-
-## 11) Hackathon Rubric Mapping
-
-```mermaid
-pie title Rubric Coverage Mapping
-  "Impact and Uniqueness (20%)" : 20
-  "DS/Algorithms + AI + Architecture (50%)" : 50
-  "Code Quality (10%)" : 10
-  "Evaluation and Testing (20%)" : 20
-```
-
-| Rubric Area | Evidence in this repository |
-|---|---|
-| Potential Impact and Uniqueness (20%) | Neurodivergent-first reading support + deterministic + AI hybrid approach; profile-aware UX and cognitive scoring. |
-| DS/Algorithm, AI Technique, Scalability, Functionality (50%) | Trie + heap + LRU cache, DOM classification pipeline, AI+heuristic blending, stateless API, timeout and fallback handling. |
-| Code Quality (10%) | Typed TypeScript codebase, modular routes, shared message contracts, explicit bounds and guardrails, test scripts per subsystem. |
-| Model Evaluation and Testing (20%) | 55 unit checks + 30 API checks + smoke tests + synthetic benchmark with measurable deltas and stored JSON outputs. |
-
-## 12) Constraints and Future Work
-
-Current constraints:
-
-- distraction filtering is heuristic, not a full ad-block engine
-- some SPA/shadow DOM pages may yield partial extraction
-- synthetic benchmark should be complemented by human-labeled accessibility studies
-
-Planned improvements:
-
-- add human evaluation protocol with comprehension and fatigue scoring
-- add per-site personalization and long-term adaptation
-- add end-to-end browser automation tests for messaging and UI behavior
-- improve multilingual simplification and term glossing
-
-## 13) License
-
-MIT (hackathon / educational use).
