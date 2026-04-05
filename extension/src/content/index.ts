@@ -181,10 +181,13 @@ let currentSettings: PageSettings = {
 let quickLauncherEl: HTMLButtonElement | null = null;
 let quickPanelEl: HTMLDivElement | null = null;
 let quickStatusEl: HTMLDivElement | null = null;
+let quickResultWrapEl: HTMLDivElement | null = null;
+let quickResultTextEl: HTMLPreElement | null = null;
 let quickReadabilityInput: HTMLInputElement | null = null;
 let quickDistractionInput: HTMLInputElement | null = null;
 let quickFocusInput: HTMLInputElement | null = null;
 let quickImportanceInput: HTMLInputElement | null = null;
+let simplifiedPanelTextEl: HTMLPreElement | null = null;
 let quickMenuBusy = false;
 const quickActionButtons = new Set<HTMLButtonElement>();
 let quickDismissHandlersAttached = false;
@@ -1392,7 +1395,7 @@ function ensureSimplifiedPanel(): HTMLDivElement {
       max-height: 55vh;
       overflow: auto;
       z-index: 2147483646;
-      padding: 14px 16px;
+      padding: 10px;
       border-radius: 12px;
       box-shadow: 0 8px 32px rgba(0,0,0,0.25);
       font-family: system-ui, sans-serif;
@@ -1401,12 +1404,45 @@ function ensureSimplifiedPanel(): HTMLDivElement {
       background: #1e1e1e;
       color: #f0f0f0;
       border: 1px solid rgba(255,255,255,0.12);
+    `;
+
+    const header = document.createElement("div");
+    header.style.cssText =
+      "display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px;";
+    const title = document.createElement("strong");
+    title.textContent = "Neuro output";
+    title.style.cssText = "font-size:12px;color:#d6e4ec;";
+    const closeBtn = document.createElement("button");
+    closeBtn.type = "button";
+    closeBtn.textContent = "Close";
+    closeBtn.style.cssText =
+      "border:1px solid rgba(255,255,255,0.35);background:transparent;color:#f0f0f0;border-radius:8px;padding:4px 8px;font-size:11px;cursor:pointer;";
+    closeBtn.addEventListener("click", () => {
+      if (!el) return;
+      el.style.display = "none";
+    });
+    header.append(title, closeBtn);
+
+    simplifiedPanelTextEl = document.createElement("pre");
+    simplifiedPanelTextEl.style.cssText = `
+      margin: 0;
       white-space: pre-wrap;
       word-break: break-word;
       overflow-wrap: anywhere;
+      font-size: 13px;
+      line-height: 1.55;
+      font-family: inherit;
+      color: inherit;
     `;
+
+    el.append(header, simplifiedPanelTextEl);
     document.documentElement.appendChild(el);
   }
+
+  if (!simplifiedPanelTextEl) {
+    simplifiedPanelTextEl = el.querySelector("pre") as HTMLPreElement | null;
+  }
+
   return el;
 }
 
@@ -1420,15 +1456,121 @@ function normalizePanelText(raw: string): string {
     .trim();
 }
 
+function isQuickPanelOpen(): boolean {
+  return Boolean(quickPanelEl && quickPanelEl.style.display === "block");
+}
+
 function showSimplifiedPanel(text: string, visible: boolean): void {
+  if (visible && isQuickPanelOpen()) {
+    showQuickResult(text);
+    const existing = document.getElementById(OVERLAY_ID) as HTMLDivElement | null;
+    if (existing) {
+      existing.style.display = "none";
+    }
+    return;
+  }
+
+  if (!visible) {
+    const existing = document.getElementById(OVERLAY_ID) as HTMLDivElement | null;
+    if (existing) {
+      existing.style.display = "none";
+    }
+    return;
+  }
+
   const el = ensureSimplifiedPanel();
-  el.textContent = normalizePanelText(text);
-  el.style.display = visible ? "block" : "none";
+  const normalized = normalizePanelText(text);
+  if (simplifiedPanelTextEl) {
+    simplifiedPanelTextEl.textContent = normalized;
+  }
+  el.style.display = "block";
 }
 
 function setQuickStatus(text: string): void {
   if (!quickStatusEl) return;
   quickStatusEl.textContent = text;
+}
+
+function ensureQuickResultElements(): void {
+  if (!quickPanelEl) return;
+
+  if (!quickResultWrapEl) {
+    quickResultWrapEl = quickPanelEl.querySelector(
+      '[data-neuro-result-wrap="true"]'
+    ) as HTMLDivElement | null;
+  }
+  if (!quickResultTextEl) {
+    quickResultTextEl = quickPanelEl.querySelector(
+      '[data-neuro-result-text="true"]'
+    ) as HTMLPreElement | null;
+  }
+  if (quickResultWrapEl && quickResultTextEl) {
+    return;
+  }
+
+  quickResultWrapEl = document.createElement("div");
+  quickResultWrapEl.setAttribute("data-neuro-result-wrap", "true");
+  quickResultWrapEl.style.cssText =
+    "display:none;margin-top:8px;border:1px solid #c9d9e5;border-radius:8px;background:#ffffff;";
+
+  const resultHeader = document.createElement("div");
+  resultHeader.style.cssText =
+    "display:flex;align-items:center;justify-content:space-between;gap:8px;padding:6px 8px;border-bottom:1px solid #dce7ef;font-size:11px;font-weight:700;color:#355062;";
+  const resultTitle = document.createElement("span");
+  resultTitle.textContent = "Result";
+  const resultCloseBtn = document.createElement("button");
+  resultCloseBtn.type = "button";
+  resultCloseBtn.textContent = "Close";
+  resultCloseBtn.style.cssText =
+    "border:1px solid #bfd0de;border-radius:7px;background:#ffffff;color:#1f2f3a;padding:3px 7px;font-size:10px;cursor:pointer;";
+  resultCloseBtn.addEventListener("click", () => {
+    hideQuickResult();
+  });
+  resultHeader.append(resultTitle, resultCloseBtn);
+
+  quickResultTextEl = document.createElement("pre");
+  quickResultTextEl.setAttribute("data-neuro-result-text", "true");
+  quickResultTextEl.style.cssText = `
+    margin: 0;
+    padding: 8px;
+    max-height: 180px;
+    overflow: auto;
+    white-space: pre-wrap;
+    word-break: break-word;
+    overflow-wrap: anywhere;
+    font-size: 12px;
+    line-height: 1.45;
+    color: #1f2f3a;
+    background: #ffffff;
+    border-radius: 0 0 8px 8px;
+  `;
+
+  quickResultWrapEl.append(resultHeader, quickResultTextEl);
+  quickPanelEl.appendChild(quickResultWrapEl);
+}
+
+function showQuickResult(text: string): void {
+  if (!quickPanelEl) {
+    ensureQuickPanel();
+  }
+  ensureQuickResultElements();
+  const normalized = normalizePanelText(text);
+  if (quickResultTextEl) {
+    quickResultTextEl.textContent = normalized;
+  }
+  if (quickResultWrapEl) {
+    quickResultWrapEl.style.display = "block";
+  }
+}
+
+function hideQuickResult(): void {
+  ensureQuickResultElements();
+  if (quickResultTextEl) {
+    quickResultTextEl.textContent = "";
+  }
+  if (quickResultWrapEl) {
+    quickResultWrapEl.style.display = "none";
+  }
 }
 
 function registerQuickActionButton(btn: HTMLButtonElement): HTMLButtonElement {
@@ -1457,6 +1599,9 @@ function setQuickPanelOpen(open: boolean): void {
   if (!quickPanelEl || !quickLauncherEl) return;
   quickPanelEl.style.display = open ? "block" : "none";
   quickLauncherEl.setAttribute("aria-expanded", open ? "true" : "false");
+  if (open) {
+    showSimplifiedPanel("", false);
+  }
   if (!open) {
     setQuickMenuBusy(false);
   }
@@ -1557,7 +1702,8 @@ async function simplifyFromQuickMenu(): Promise<void> {
       statusSuffix = "local";
     }
 
-    showSimplifiedPanel(simplified, true);
+    showQuickResult(simplified);
+    showSimplifiedPanel("", false);
     setQuickStatus(`Simplified (${statusSuffix}).`);
   } finally {
     setQuickMenuBusy(false);
@@ -1603,7 +1749,8 @@ async function summarizeFromQuickMenu(mode: "tldr" | "bullets"): Promise<void> {
           : localSummarizeFallback(sourceText, "bullets");
 
       const smart = buildSmartTldr(sourceText, tldrText, bulletText);
-      showSimplifiedPanel(smart, true);
+      showQuickResult(smart);
+      showSimplifiedPanel("", false);
       setQuickStatus(tldrRes.ok || bulletsRes.ok ? "Smart TL;DR ready." : "Smart TL;DR fallback used.");
       return;
     }
@@ -1620,7 +1767,8 @@ async function summarizeFromQuickMenu(mode: "tldr" | "bullets"): Promise<void> {
         ? res.summary.trim()
         : localSummarizeFallback(sourceText, "bullets");
 
-    showSimplifiedPanel(buildKeyPointsSummary(sourceText, summary), true);
+    showQuickResult(buildKeyPointsSummary(sourceText, summary));
+    showSimplifiedPanel("", false);
     setQuickStatus(res.ok ? "Key points ready." : "Key points fallback used.");
   } finally {
     setQuickMenuBusy(false);
@@ -1631,7 +1779,8 @@ function showStructuredLayoutFromQuickMenu(): void {
   if (quickMenuBusy) return;
   const analysis = getPageAnalysis(true);
   const structured = buildStructuredLayoutText(analysis);
-  showSimplifiedPanel(structured, true);
+  showQuickResult(structured);
+  showSimplifiedPanel("", false);
   setQuickStatus("Structured layout ready.");
 }
 
@@ -1774,6 +1923,7 @@ function ensureQuickPanel(): HTMLDivElement {
   hideTextBtn.style.cssText = "border:0;border-radius:8px;padding:7px 8px;background:#ffffff;color:#3a4f60;font-size:12px;cursor:pointer;border:1px solid #c9d9e5;";
   hideTextBtn.addEventListener("click", () => {
     showSimplifiedPanel("", false);
+    hideQuickResult();
     setQuickStatus("Text panel hidden.");
   });
 
@@ -1791,6 +1941,46 @@ function ensureQuickPanel(): HTMLDivElement {
   quickStatusEl.style.cssText = "margin-top:8px;padding:6px 8px;border-radius:8px;background:#ecf4fa;color:#375164;font-size:11px;line-height:1.3;";
   quickStatusEl.textContent = "Ready.";
   panel.appendChild(quickStatusEl);
+
+  quickResultWrapEl = document.createElement("div");
+  quickResultWrapEl.setAttribute("data-neuro-result-wrap", "true");
+  quickResultWrapEl.style.cssText =
+    "display:none;margin-top:8px;border:1px solid #c9d9e5;border-radius:8px;background:#ffffff;";
+
+  const resultHeader = document.createElement("div");
+  resultHeader.style.cssText =
+    "display:flex;align-items:center;justify-content:space-between;gap:8px;padding:6px 8px;border-bottom:1px solid #dce7ef;font-size:11px;font-weight:700;color:#355062;";
+  const resultTitle = document.createElement("span");
+  resultTitle.textContent = "Result";
+  const resultCloseBtn = document.createElement("button");
+  resultCloseBtn.type = "button";
+  resultCloseBtn.textContent = "Close";
+  resultCloseBtn.style.cssText =
+    "border:1px solid #bfd0de;border-radius:7px;background:#ffffff;color:#1f2f3a;padding:3px 7px;font-size:10px;cursor:pointer;";
+  resultCloseBtn.addEventListener("click", () => {
+    hideQuickResult();
+  });
+  resultHeader.append(resultTitle, resultCloseBtn);
+
+  quickResultTextEl = document.createElement("pre");
+  quickResultTextEl.setAttribute("data-neuro-result-text", "true");
+  quickResultTextEl.style.cssText = `
+    margin: 0;
+    padding: 8px;
+    max-height: 180px;
+    overflow: auto;
+    white-space: pre-wrap;
+    word-break: break-word;
+    overflow-wrap: anywhere;
+    font-size: 12px;
+    line-height: 1.45;
+    color: #1f2f3a;
+    background: #ffffff;
+    border-radius: 0 0 8px 8px;
+  `;
+
+  quickResultWrapEl.append(resultHeader, quickResultTextEl);
+  panel.appendChild(quickResultWrapEl);
 
   document.documentElement.appendChild(panel);
   quickPanelEl = panel;
